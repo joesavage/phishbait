@@ -116,6 +116,15 @@ int main(int argc, char *argv[]) {
 			continue;
 		}
 
+#if DEBUG
+		// In debug, allow 'bind' to reuse addresses/sockets (we don't close the socket on ^C right now, which is annoying for debugging)
+		int so_reuseaddr = 1;
+		if (setsockopt(bind_socket, SOL_SOCKET, SO_REUSEADDR, &so_reuseaddr, sizeof(so_reuseaddr)) == -1) {
+			fprintf(stderr, "'setsockopt(2)' failed\n");
+			exit(1);
+		}
+#endif
+
 		// Try to bind on the newly constructed socket
 		if (!bind(bind_socket, bind_addr->ai_addr, bind_addr->ai_addrlen)) {
 			break; // Success!
