@@ -8,6 +8,7 @@
 #define DEBUG 1
 
 #if DEBUG
+#include <string.h>
 #include <assert.h>
 #define ASSERT(cond) assert(cond)
 #else
@@ -34,7 +35,7 @@ struct addrinfo *get_host_addrinfos(const char *host_addr, const char *host_port
 	return result;
 }
 
-void process_request(int client_socket, const char *backend_addr, const char *backend_port) {
+int create_backend_socket(const char *backend_addr, const char *backend_port) {
 	// Get the back-end 'addrinfo' structs
 	struct addrinfo *backend_addrinfos = get_host_addrinfos(backend_addr, backend_port, 0);
 
@@ -65,12 +66,15 @@ void process_request(int client_socket, const char *backend_addr, const char *ba
 	backend_addrinfos = NULL;
 	backend_addrinfo = NULL;
 
+	return backend_socket;
+}
 
+void process_request(int client_socket, int backend_socket) {
 	// Forward the client's request to the back-end
 	// TODO: There may be weird HTTP stuff (partial responses and timeouts and things) that we need to deal with here.
 	// TODO: Figure out how much data we want to read from the requester for HTTP headers.
 	{
-		char client_buffer[2048];
+		char client_buffer[4096];
 		ssize_t bytes_read = read(client_socket, client_buffer, sizeof(client_buffer)); // TODO: Timeout?
 		if (bytes_read == -1) {
 			// TODO: log
@@ -83,17 +87,23 @@ void process_request(int client_socket, const char *backend_addr, const char *ba
 
 	// TODO: Parse client HTTP request headers (carefully!)
 
+#if 1
 	// Forward the back-end's response to the client
 	{
-		char server_buffer[2048];
+		char backend_buffer[4096];
 		ssize_t bytes_read;
-		while ((bytes_read = read(backend_socket, server_buffer, sizeof(server_buffer)))) {
-			ssize_t bytes_written = write(client_socket, server_buffer, bytes_read);
+
+		// For whatever reason, this loop is really slow the second time around in testing.
+		// I'm guessing that it waits a while to check there's definitely no more data to pass or something?
+		while ((bytes_read = read(backend_socket, backend_buffer, sizeof(backend_buffer)))) {
+			ssize_t bytes_written = write(client_socket, backend_buffer, bytes_read);
 			ASSERT(bytes_written == bytes_read);
 		}
 	}
-
-	close(backend_socket);
+#else
+	char *data = "HTTP/1.1 200 OK\r\n\r\nHello, this is a test!";
+	write(client_socket, data, strlen(data));
+#endif
 }
 
 int main(int argc, char *argv[]) {
@@ -161,11 +171,14 @@ int main(int argc, char *argv[]) {
 			continue; // We could probably deal with more specifics errors better here
 		}
 
-		// TODO: We probably don't want to do the back-end address lookup for /every/ client
-		// when it should be the same for all clients (hence: just do it once).
-		process_request(client_socket, backend_addr, backend_port);
+		// It would be nice if we could reuse this across multiple clients, but when I try
+		// that things break. So we just recreate the socket for every client for now.
+		int backend_socket = create_backend_socket(backend_addr, backend_port);
+
+		process_request(client_socket, backend_socket);
 		printf("Processed request for client\n");
 
+		close(backend_socket);
 		close(client_socket);
 	}
 
