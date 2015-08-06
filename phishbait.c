@@ -14,21 +14,29 @@
 #define ASSERT(cond)
 #endif
 
-void process_request(int client_socket, const char *backend_addr, const char *backend_port) {
-	// Get the back-end 'addrinfo's
-	struct addrinfo *backend_addrinfos;
-	{
-		// We're looking for IPv4/IPv6 streaming sockets
-		struct addrinfo hints = {};
-		hints.ai_family = AF_UNSPEC;
-		hints.ai_socktype = SOCK_STREAM;
+struct addrinfo *get_host_addrinfos(const char *host_addr, const char *host_port, int ai_flags) {
+	struct addrinfo *result;
 
-		int error_code;
-		if ((error_code = getaddrinfo(backend_addr, backend_port, &hints, &backend_addrinfos))) {
-			fprintf(stderr, "'getaddrinfo(3)' failed for backend '%s', with error code: %d\n", backend_addr, error_code);
-			exit(1);
-		}
+	// We're looking for IPv4/IPv6 streaming sockets
+	struct addrinfo hints = {};
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = ai_flags;
+
+	int error_code;
+	if ((error_code = getaddrinfo(host_addr, host_port, &hints, &result))) {
+		host_addr = host_addr ? host_addr : "NULL";
+		host_port = host_port ? host_port : "NULL";
+		fprintf(stderr, "'getaddrinfo' failed for host '%s' on port '%s', with error code: %d\n", host_addr, host_port, error_code);
+		exit(1);
 	}
+
+	return result;
+}
+
+void process_request(int client_socket, const char *backend_addr, const char *backend_port) {
+	// Get the back-end 'addrinfo' structs
+	struct addrinfo *backend_addrinfos = get_host_addrinfos(backend_addr, backend_port, 0);
 
 	// Establish a connection to the back-end server
 	int backend_socket;
@@ -66,6 +74,7 @@ void process_request(int client_socket, const char *backend_addr, const char *ba
 		ssize_t bytes_read = read(client_socket, client_buffer, sizeof(client_buffer)); // TODO: Timeout?
 		if (bytes_read == -1) {
 			// TODO: log
+			assert(0);
 		} else if (bytes_read != 0) {
 			ssize_t bytes_written = write(backend_socket, client_buffer, bytes_read);
 			ASSERT(bytes_written == bytes_read);
@@ -92,20 +101,8 @@ int main(int argc, char *argv[]) {
 	const char *backend_addr = "localhost";
 	const char *backend_port = "http";
 
-	// Get the 'addrinfo' to host on
-	struct addrinfo *bind_addrs;
-	{
-		struct addrinfo hints = {};
-		hints.ai_family = AF_UNSPEC;
-		hints.ai_socktype = SOCK_STREAM;
-		hints.ai_flags = AI_PASSIVE;
-
-		int error_code;
-		if ((error_code = getaddrinfo(NULL, bind_port, &hints, &bind_addrs))) {
-			fprintf(stderr, "'getaddrinfo(3)' failed with error code: %d\n", error_code);
-			exit(1);
-		}
-	}
+	// Get the 'addrinfo' structs we might want to host on
+	struct addrinfo *bind_addrs = get_host_addrinfos(NULL, bind_port, AI_PASSIVE);
 
 	// Bind to the address to host on
 	int bind_socket;
@@ -120,7 +117,7 @@ int main(int argc, char *argv[]) {
 		// In debug, allow 'bind' to reuse addresses/sockets (we don't close the socket on ^C right now, which is annoying for debugging)
 		int so_reuseaddr = 1;
 		if (setsockopt(bind_socket, SOL_SOCKET, SO_REUSEADDR, &so_reuseaddr, sizeof(so_reuseaddr)) == -1) {
-			fprintf(stderr, "'setsockopt(2)' failed\n");
+			fprintf(stderr, "'setsockopt' failed\n");
 			exit(1);
 		}
 #endif
@@ -144,8 +141,9 @@ int main(int argc, char *argv[]) {
 	bind_addr = NULL;
 
 	// Mark the socket we've bound on to listen for incoming connections
-	// TODO: Explore changing the 'backlog' value from 1
-	if (listen(bind_socket, 1) == -1) {
+	// The 'backlog' value here should be configurable, but I'll leave this functionality
+	// until 'epoll' is implemented (as it might change some things up).
+	if (listen(bind_socket, 50) == -1) {
 		fprintf(stderr, "Failed to listen on host\n");
 		exit(1);
 	}
@@ -157,11 +155,10 @@ int main(int argc, char *argv[]) {
 	// TODO: Consider multi-threading options
 	printf("Listening on port %s...\n", bind_port);
 	while (1) {
-		// TODO: We may want to take 'sockaddr' info in future
-		int client_socket = accept(bind_socket, NULL, NULL);
+		int client_socket = accept(bind_socket, NULL, NULL); // We may want to take this 'sockaddr' info in future
 		if (client_socket == -1) {
 			fprintf(stderr, "Failed to accept connection from client\n");
-			exit(1); // TODO: We probably shouldn't 'exit' on this case (log or whatever)
+			continue; // We could probably deal with more specifics errors better here
 		}
 
 		// TODO: We probably don't want to do the back-end address lookup for /every/ client
