@@ -12,8 +12,6 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <string.h>
-#include <pthread.h>
-#include <limits.h>
 
 #define DEBUG 1
 
@@ -304,27 +302,6 @@ int create_backend_socket() {
 	return backend_socket;
 }
 
-struct thread_info {
-	int client_socket;
-	pthread_t tid;
-};
-
-static void *start_client_thread(void *thread_arg) {
-	struct thread_info tinfo = *(struct thread_info *)thread_arg;
-
-	// It would be nice if we could reuse this socket across multiple clients, but
-	// I get the impression that this isn't how this is designed to work.
-	int backend_socket = create_backend_socket();
-
-	process_request(tinfo.client_socket, backend_socket);
-
-	close(backend_socket);
-	close(tinfo.client_socket);
-
-	free(thread_arg);
-	return 0;
-}
-
 int main(int argc, char *argv[]) {
 	bind_port = "31500"; // TODO: Accept these params as CLI args
 	backend_addr = "localhost";
@@ -375,45 +352,28 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 
-	// Prepare for threading
-	pthread_attr_t thread_attributes;
-	{
-		int error_code;
-		if ((error_code = pthread_attr_init(&thread_attributes))) {
-			fprintf(stderr, "Call to 'pthread_attr_init' failed with error code: %d\n", error_code);
-			exit(1);
-		}
-	}
-	{
-		int error_code;
-		if ((error_code = pthread_attr_setstacksize(&thread_attributes, MAX(PTHREAD_STACK_MIN, 32768)))) {
-			fprintf(stderr, "Call to 'pthread_attr_setstacksize' failed with error code: %d\n", error_code);
-			exit(1);
-		}
-	}
-
 	// Accept and deal with clients
 	// NOTE: The plan was originally to use 'epoll' for more efficient (less blocking) I/O usage, but
 	// it doesn't exist on OS X which is inconvenient for development. I could use 'kqueue', but that
-	// doesn't exist on Linux. As a result, we're sticking with threaded blocking I/O for now (no c10k for us).
-	// TODO: Max thread count.
+	// doesn't exist on Linux. 'libevent'/'libev' seem to abstract nicely over these?
 	printf("Listening on port %s...\n", bind_port);
 	while (1) {
-		struct thread_info *tinfo = (struct thread_info *)malloc(sizeof(struct thread_info)); // TODO: Switch from malloc to better pooled alloc, also error check malloc.
-		tinfo->client_socket = accept(bind_socket, NULL, NULL); // We may want to take this 'sockaddr' info in future
-		if (tinfo->client_socket == -1) {
+		int client_socket = accept(bind_socket, NULL, NULL); // We may want to take this 'sockaddr' info in future
+		if (client_socket == -1) {
 			fprintf(stderr, "Failed to accept connection from client\n");
 			continue; // We could probably deal with more specifics errors better here
 		}
 
-		int error_code;
-		if ((error_code = pthread_create(&tinfo->tid, &thread_attributes, start_client_thread, tinfo))) {
-			fprintf(stderr, "Failed to create new client thread with error code: %d\n", error_code);
-			continue;
-		}
+		// It would be nice if we could reuse this socket across multiple clients, but
+		// I get the impression that this isn't how this is designed to work.
+		int backend_socket = create_backend_socket();
+
+		process_request(client_socket, backend_socket);
+
+		close(backend_socket);
+		close(client_socket);
 	}
 
-	pthread_attr_destroy(&thread_attributes);
 	close(bind_socket);
 	return 0;
 }
