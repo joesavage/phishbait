@@ -1,3 +1,10 @@
+/*
+ * Phishbait - a reverse proxy for dealing with uninvited hotlinking.
+ * Copyright 2015, Joe Savage
+ * 
+ * NOTE: This codebase assumes that we're compiling with an ASCII character set.
+*/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -15,7 +22,9 @@
 #define ASSERT(cond)
 #endif
 
+#define READ_BUFER_SIZE 4096
 #define MAXIMUM_REQUEST_HEADER_SIZE 2048
+#define REQUEST_HEADER_NULL_BUFFER_SIZE 8
 
 struct addrinfo *get_host_addrinfos(const char *host_addr, const char *host_port, int ai_flags) {
 	struct addrinfo *result;
@@ -59,6 +68,8 @@ int create_backend_socket(const char *backend_addr, const char *backend_port) {
 
 	// Check if we managed to connect successfully to the back-end
 	if (backend_addrinfo == NULL) {
+		// TODO: It would be nicer if we could return a 500 error to the user,
+		// and try to retry connection rather than exiting.
 		fprintf(stderr, "Failed to connect to backend '%s'\n", backend_addr);
 		exit(1);
 	}
@@ -70,52 +81,6 @@ int create_backend_socket(const char *backend_addr, const char *backend_port) {
 
 	return backend_socket;
 }
-
-// static inline int is_whitespace(char ch) {
-// 	// NOTE: This code assumes the compiler uses an ASCII text encoding.
-// 	return ch == ' ' || (ch >= '\t' && ch <= '\r');
-// }
-
-// struct req_header_position {
-// 	char *cursor;
-// 	int last_no_of_lines_passed;
-// };
-
-// struct req_header_position skip_whitespace(char *cursor) {
-// 	struct req_header_position result = {};
-// 	while (is_whitespace(*cursor)) {
-// 		if (cursor[0] == '\r') {
-// 			if (cursor[1] == '\n') {
-// 				++cursor;
-// 			}
-// 			++cursor;
-// 			++result.last_no_of_lines_passed;
-// 		} else if (cursor[0] == '\n') {
-// 			if (cursor[1] == '\r') {
-// 				++cursor;
-// 			}
-// 			++cursor;
-// 			++result.last_no_of_lines_passed;
-// 		} else {
-// 			++cursor;
-// 		}
-// 	}
-
-// 	result.cursor = cursor;
-// 	return result;
-// }
-
-// struct req_header_position skip_non_whitespace(char *cursor) {
-// 	struct req_header_position result;
-// 	result.cursor = cursor;
-// 	result.last_no_of_lines_passed = 0;
-
-// 	while (!is_whitespace(result.cursor[0]) && result.cursor[0] != '\0') {
-// 		++result.cursor;
-// 	}
-
-// 	return result;
-// }
 
 static inline int match_string(const char **cursor, char *str) {
 	const char *cursor_str = *cursor;
@@ -141,46 +106,29 @@ static inline int is_pchar(char ch) {
 	//                  "ALPHA (%41-%5A and %61-%7A), DIGIT (%30-%39)"
 	//              pct-encoded = "%" HEXDIG HEXDIG
 	//              sub-delims  = "!" / "$" / "&" / "'" / "(" / ")" / "*" / "+" / "," / ";" / "="
-	// NOTE: I'm assuming that we're compiling with an ASCII character set.
 	// NOTE: This isn't a strict parse, because we allow '%' anywhere rather than just in 'pct-encoded'.
 	return is_alpha(ch) || is_digit(ch) || (ch >= '&' && ch <= '.') || ch == '_' || ch == ':' || ch == '~' || ch == ';' || ch == '=' || ch == '@' || ch == '!' || ch == '$' || ch == '%';
 }
 
 static inline size_t parse_http_uri_rougly(const char **cursor) {
 	// RFC7230: request-target = origin-form / absolute-form / authority-form / asterisk-form
-	//              origin-form = absolute-path [ "?" query ]        ; Relative path
+	//              origin-form = absolute-path [ "?" query ]
 	//                  absolute-path = 1*( "/" segment )
 	//                      segment = *pchar
 	//                          pchar = unreserved / pct-encoded / sub-delims / ":" / "@"
 	//                              unreserved  = ALPHA / DIGIT / "-" / "." / "_" / "~"
 	//                              pct-encoded = "%" HEXDIG HEXDIG
 	//                              sub-delims  = "!" / "$" / "&" / "'" / "(" / ")" / "*" / "+" / "," / ";" / "="
-	//              authority-form = authority        ; Authority path (without scheme)
+	//              authority-form = authority
 	//                  authority = [ userinfo "@" ] host [ ":" port ]
-	//                      userinfo = *( unreserved / pct-encoded / sub-delims / ":" )
-	//                      host = IP-literal / IPv4address / reg-name
-	//                          IP-literal  = "[" ( IPv6address / IPvFuture  ) "]"
-	//                              IPv6address = https://tools.ietf.org/html/rfc3986#section-3.2.2
-	//                              IPvFuture  = "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )
-	//                          IPv4address = dec-octet "." dec-octet "." dec-octet "." dec-octet
-	//                          reg-name    = *( unreserved / pct-encoded / sub-delims )
-	//                      port = *DIGIT
-	//              absolute-form = absolute-URI        ; Absolute path (with scheme, etc.)
+	//              absolute-form = absolute-URI
 	//                  absolute-URI = scheme ":" hier-part [ "?" query ]
 	//                      hier-part = ("//" authority path-abempty) / path-absolute / path-rootless / path-empty
-	//                          path-abempty  = *( "/" segment )        ; Begins with a slash or is empty
-	//                          path-absolute = "/" [ segment-nz *( "/" segment ) ]        ; Begins with a slash (but not a '//', in this context)
-	//                              segment-nz    = 1*pchar        ; Non-zero segment
-	//                          path-rootless = segment-nz *( "/" segment )        ; Doesn't begin with a '/'
-	//                          path-empty    = 0<pchar>        ; Empty (zero characters)
 	//              asterisk-form = "*"
 	// RFC7231: Referer = absolute-URI / partial-URI
 	//              partial-URI = relative-part [ "?" query ]
-	//                  relative-part = ("//" authority path-abempty) / path-absolute / path-noscheme / path-empty        ; Like hier-part, but without rootless (no leading '/'), and with noscheme.
-	//                      path-noscheme = segment-nz-nc *( "/" segment )
-	//                          segment-nz-nc = 1*( unreserved / pct-encoded / sub-delims / "@" )        ; Non-zero segment with no colons
-	// NOTE: For this particular purpose, we don't /super/ care about every little part so this is just a rough parse
-	// assuming we're looking for a string with combinations of 'pchar' and '/' characters.
+	//                  relative-part = ("//" authority path-abempty) / path-absolute / path-noscheme / path-empty
+	// NOTE: We don't /super/ care about every little part here, so this is just a rough parse for a string with combinations of 'pchar' and '/' characters.
 	const char *uri_start = *cursor;
 	const char *uri_end = uri_start;
 	while (is_pchar(*uri_end) || *uri_end == '/') {
@@ -262,14 +210,14 @@ int parse_http_request_header(const char *cursor, const char **request_uri_out, 
 	//         field-value    = *( field-content / obs-fold )
 	//             field-content  = field-vchar [ 1*( SP / HTAB ) field-vchar ]
 	//                 field-vchar    = VCHAR / obs-text
-	//         NOTE: This implementation does not support obsolete line folding (i.e. 'obs-fold')
+	// NOTE: This implementation does not support obsolete line folding (i.e. 'obs-fold')
 	while (skip_past_next_http_newline(&cursor)) {
 		if (peek_http_newline(cursor)) {
 			break;
 		} else if (match_string(&cursor, "Referer:")) {
 			skip_http_ows(&cursor); // 'OWS'
 
-			// TODO: I don't believe the referer field value can be a 'quoted-string' [Check!]
+			// I don't believe the referer field value can be a 'quoted-string'
 			*referer_out = cursor;
 			*referer_length_out = parse_http_uri_rougly(&cursor); // 'field-value'
 			break;
@@ -280,53 +228,61 @@ int parse_http_request_header(const char *cursor, const char **request_uri_out, 
 }
 
 void process_request(int client_socket, int backend_socket) {
-	// Forward the client's request to the back-end
-	// TODO: There may be weird HTTP stuff (partial responses and timeouts and things) that we need to deal with here.
-	char request_buffer_head[MAXIMUM_REQUEST_HEADER_SIZE + 1]; // TODO: How large do we want this to be?
-	// char char request_buffer_tail[MAXIMUM_REQUEST_HEADER_SIZE]; // TODO: Send the rest of the request to the server! (Currently we only send the first 'read')
+	// Parse the client's request and forward it to the back-end
+	int parsed_header_successfully = 0, is_phishing_refferal = 0;
+	const char *request_uri = NULL, *referer = NULL;
+	size_t request_uri_length = 0, referer_length = 0;
 	{
-		ssize_t bytes_read = read(client_socket, request_buffer_head, sizeof(request_buffer_head) - 1); // TODO: Timeout?
+		// Null-terminated HTTP request string (with null buffer, just in case)
+		// TODO: How large do we want MAXIMUM_REQUEST_HEADER_SIZE to be?
+		char request_buffer_head[MAXIMUM_REQUEST_HEADER_SIZE + REQUEST_HEADER_NULL_BUFFER_SIZE];
+		memset(request_buffer_head + MAXIMUM_REQUEST_HEADER_SIZE, 0, REQUEST_HEADER_NULL_BUFFER_SIZE);
+
+		// TODO: Read/client timeout?
+		ssize_t bytes_read = read(client_socket, request_buffer_head, sizeof(request_buffer_head) - REQUEST_HEADER_NULL_BUFFER_SIZE);
+
 		if (bytes_read == -1) {
-			// TODO: log
+			// TODO: Log?
 			ASSERT(0);
 			return;
 		} else if (bytes_read != 0) {
+			// Parse request HTTP 'Referer' header.
+			// Given the tool's purpose, we just pass on any malformed / odd HTTP requests (plus, this is good for performance)
+			if (parse_http_request_header(request_buffer_head, &request_uri, &request_uri_length, &referer, &referer_length)) {
+				if (referer && referer_length > 0) {
+					printf("REFERER URI: %.*s\n", (int)referer_length, referer);
+
+					// TODO: Check against a hashmap or something (if there's a long list of sites to check against,
+					// maybe we want to use the hashmap as a cache and performed timed eviction with it).
+					is_phishing_refferal = referer_length % 2;
+				}
+
+				if (request_uri) {
+					printf("REQ URI: %.*s\n\n", (int)request_uri_length, request_uri);
+				}
+			}
+
+			// Forward the client's request to the back-end
 			ssize_t bytes_written = write(backend_socket, request_buffer_head, bytes_read);
 			ASSERT(bytes_written == bytes_read);
-		}
-	}
-
-	// Parse request HTTP 'Referer' header.
-	// Given the purpose of this tool, malformed or odd HTTP requests are passed without further checking.
-	// Not only is this beneficial for performance, but given the purpose of this tool - the users
-	// effected by phishing issues will likely be using sane, relatively-compliant web browsers.
-
-	// Is there a practical limit on this? TODO: Currently, we probably have overflow issues with these.
-	int is_phishing_refferal = 0;
-	const char *request_uri, *referer;
-	size_t request_uri_length, referer_length;
-	if (parse_http_request_header(request_buffer_head, &request_uri, &request_uri_length, &referer, &referer_length)) {
-		if (referer && referer_length > 0) {
-			printf("REFERER URI: %.*s\n", (int)referer_length, referer);
-			is_phishing_refferal = referer_length % 2;
-		}
-
-		if (request_uri) {
-			printf("REQ URI: %.*s\n\n", (int)request_uri_length, request_uri);
+			// TODO: Send the rest of the request to the server! (Currently we only send the first 'read')
+			// char char request_buffer_tail[READ_BUFER_SIZE];
 		}
 	}
 	
+	// TODO: Check request_uri file extension (if it's an image, we can have some fun - etc.)
+	// (It would be good if the replacements for certain file extensions were configurable)
 
-#if 0
+#if 1
 	// Forward the back-end's response to the client
 	{
-		char response_buffer[4096];
+		char response_buffer[READ_BUFER_SIZE];
 		ssize_t bytes_read;
 
 		// For whatever reason, this loop is really slow the second time around in testing.
 		// I'm guessing that it waits a while to check there's definitely no more data to pass or something?
 		// Switching to using 'epoll' should probably help this considerably.
-		while ((bytes_read = read(backend_socket, response_buffer, sizeof(response_buffer) - 1))) {
+		while ((bytes_read = read(backend_socket, response_buffer, sizeof(response_buffer)))) {
 			ssize_t bytes_written = write(client_socket, response_buffer, bytes_read);
 			ASSERT(bytes_written == bytes_read);
 		}
@@ -343,7 +299,7 @@ void process_request(int client_socket, int backend_socket) {
 }
 
 int main(int argc, char *argv[]) {
-	const char *bind_port = "31500";
+	const char *bind_port = "31500"; // TODO: Accept these params as CLI args
 	const char *backend_addr = "localhost";
 	const char *backend_port = "http";
 
