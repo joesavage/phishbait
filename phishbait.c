@@ -11,11 +11,13 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <string.h>
+#include <pthread.h>
+#include <limits.h>
 
 #define DEBUG 1
 
 #if DEBUG
-#include <string.h>
 #include <assert.h>
 #define ASSERT(cond) assert(cond)
 #else
@@ -26,61 +28,11 @@
 #define MAXIMUM_REQUEST_HEADER_SIZE 2048
 #define REQUEST_HEADER_NULL_BUFFER_SIZE 8
 
-struct addrinfo *get_host_addrinfos(const char *host_addr, const char *host_port, int ai_flags) {
-	struct addrinfo *result;
+#define MAX(X, Y) (((X) > (Y)) ? (X) : (Y))
 
-	// We're looking for IPv4/IPv6 streaming sockets
-	struct addrinfo hints = {};
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_flags = ai_flags;
-
-	int error_code;
-	if ((error_code = getaddrinfo(host_addr, host_port, &hints, &result))) {
-		host_addr = host_addr ? host_addr : "NULL";
-		host_port = host_port ? host_port : "NULL";
-		fprintf(stderr, "'getaddrinfo' failed for host '%s' on port '%s', with error code: %d\n", host_addr, host_port, error_code);
-		exit(1);
-	}
-
-	return result;
-}
-
-int create_backend_socket(const char *backend_addr, const char *backend_port) {
-	// Get the back-end 'addrinfo' structs
-	struct addrinfo *backend_addrinfos = get_host_addrinfos(backend_addr, backend_port, 0);
-
-	// Establish a connection to the back-end server
-	int backend_socket;
-	struct addrinfo *backend_addrinfo;
-	for (backend_addrinfo = backend_addrinfos; backend_addrinfo != NULL; backend_addrinfo = backend_addrinfo->ai_next) {
-		// Try to create a socket to this particular back-end addrinfo
-		if ((backend_socket = socket(backend_addrinfo->ai_family, backend_addrinfo->ai_socktype, backend_addrinfo->ai_protocol)) == -1) {
-			continue;
-		}
-
-		// Try to connect to the newly constructed socket
-		if (!connect(backend_socket, backend_addrinfo->ai_addr, backend_addrinfo->ai_addrlen)) {
-			break; // Success!
-		}
-		close(backend_socket);
-	}
-
-	// Check if we managed to connect successfully to the back-end
-	if (backend_addrinfo == NULL) {
-		// TODO: It would be nicer if we could return a 500 error to the user,
-		// and try to retry connection rather than exiting.
-		fprintf(stderr, "Failed to connect to backend '%s'\n", backend_addr);
-		exit(1);
-	}
-
-	// We're done with 'addrinfo' structs
-	freeaddrinfo(backend_addrinfos);
-	backend_addrinfos = NULL;
-	backend_addrinfo = NULL;
-
-	return backend_socket;
-}
+const char *bind_port;
+const char *backend_addr;
+const char *backend_port;
 
 static inline int match_string(const char **cursor, char *str) {
 	const char *cursor_str = *cursor;
@@ -242,7 +194,7 @@ void process_request(int client_socket, int backend_socket) {
 		ssize_t bytes_read = read(client_socket, request_buffer_head, sizeof(request_buffer_head) - REQUEST_HEADER_NULL_BUFFER_SIZE);
 
 		if (bytes_read == -1) {
-			// TODO: Log?
+			fprintf(stderr, "Failed to read client header data.\n");
 			ASSERT(0);
 			return;
 		} else if (bytes_read != 0) {
@@ -250,7 +202,7 @@ void process_request(int client_socket, int backend_socket) {
 			// Given the tool's purpose, we just pass on any malformed / odd HTTP requests (plus, this is good for performance)
 			if (parse_http_request_header(request_buffer_head, &request_uri, &request_uri_length, &referer, &referer_length)) {
 				if (referer && referer_length > 0) {
-					printf("REFERER URI: %.*s\n", (int)referer_length, referer);
+					// printf("REFERER URI: %.*s\n", (int)referer_length, referer);
 
 					// TODO: Check against a hashmap or something (if there's a long list of sites to check against,
 					// maybe we want to use the hashmap as a cache and performed timed eviction with it).
@@ -258,7 +210,7 @@ void process_request(int client_socket, int backend_socket) {
 				}
 
 				if (request_uri) {
-					printf("REQ URI: %.*s\n\n", (int)request_uri_length, request_uri);
+					// printf("REQ URI: %.*s\n\n", (int)request_uri_length, request_uri);
 				}
 			}
 
@@ -279,9 +231,7 @@ void process_request(int client_socket, int backend_socket) {
 		char response_buffer[READ_BUFER_SIZE];
 		ssize_t bytes_read;
 
-		// For whatever reason, this loop is really slow the second time around in testing.
-		// I'm guessing that it waits a while to check there's definitely no more data to pass or something?
-		// Switching to using 'epoll' should probably help this considerably.
+		// This is really slow to return when it's figuring out whether it's finished reading everything or not.
 		while ((bytes_read = read(backend_socket, response_buffer, sizeof(response_buffer)))) {
 			ssize_t bytes_written = write(client_socket, response_buffer, bytes_read);
 			ASSERT(bytes_written == bytes_read);
@@ -298,10 +248,87 @@ void process_request(int client_socket, int backend_socket) {
 #endif
 }
 
+struct addrinfo *get_host_addrinfos(const char *host_addr, const char *host_port, int ai_flags) {
+	struct addrinfo *result;
+
+	// We're looking for IPv4/IPv6 streaming sockets
+	struct addrinfo hints = {};
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = ai_flags;
+
+	int error_code;
+	if ((error_code = getaddrinfo(host_addr, host_port, &hints, &result))) {
+		host_addr = host_addr ? host_addr : "NULL";
+		host_port = host_port ? host_port : "NULL";
+		fprintf(stderr, "'getaddrinfo' failed for host '%s' on port '%s', with error code: %d\n", host_addr, host_port, error_code);
+		exit(1);
+	}
+
+	return result;
+}
+
+int create_backend_socket() {
+	// Get the back-end 'addrinfo' structs
+	struct addrinfo *backend_addrinfos = get_host_addrinfos(backend_addr, backend_port, 0);
+
+	// Establish a connection to the back-end server
+	int backend_socket;
+	struct addrinfo *backend_addrinfo;
+	for (backend_addrinfo = backend_addrinfos; backend_addrinfo != NULL; backend_addrinfo = backend_addrinfo->ai_next) {
+		// Try to create a socket to this particular back-end addrinfo
+		if ((backend_socket = socket(backend_addrinfo->ai_family, backend_addrinfo->ai_socktype, backend_addrinfo->ai_protocol)) == -1) {
+			continue;
+		}
+
+		// Try to connect to the newly constructed socket
+		if (!connect(backend_socket, backend_addrinfo->ai_addr, backend_addrinfo->ai_addrlen)) {
+			break; // Success!
+		}
+		close(backend_socket);
+	}
+
+	// Check if we managed to connect successfully to the back-end
+	if (backend_addrinfo == NULL) {
+		// TODO: It would be nicer if we could return a 500 error to the user,
+		// and try to retry connection rather than exiting.
+		fprintf(stderr, "Failed to connect to backend '%s'\n", backend_addr);
+		exit(1);
+	}
+
+	// We're done with 'addrinfo' structs
+	freeaddrinfo(backend_addrinfos);
+	backend_addrinfos = NULL;
+	backend_addrinfo = NULL;
+
+	return backend_socket;
+}
+
+struct thread_info {
+	int client_socket;
+	pthread_t tid;
+};
+
+static void *start_client_thread(void *thread_arg) {
+	struct thread_info tinfo = *(struct thread_info *)thread_arg;
+
+	// It would be nice if we could reuse this socket across multiple clients, but
+	// I get the impression that this isn't how this is designed to work.
+	int backend_socket = create_backend_socket();
+
+	process_request(tinfo.client_socket, backend_socket);
+
+	close(backend_socket);
+	close(tinfo.client_socket);
+
+	free(thread_arg);
+	return 0;
+}
+
 int main(int argc, char *argv[]) {
-	const char *bind_port = "31500"; // TODO: Accept these params as CLI args
-	const char *backend_addr = "localhost";
-	const char *backend_port = "http";
+	bind_port = "31500"; // TODO: Accept these params as CLI args
+	backend_addr = "localhost";
+	backend_port = "http";
 
 	// Get the 'addrinfo' structs we might want to host on
 	struct addrinfo *bind_addrs = get_host_addrinfos(NULL, bind_port, AI_PASSIVE);
@@ -342,37 +369,51 @@ int main(int argc, char *argv[]) {
 	bind_addrs = NULL;
 	bind_addr = NULL;
 
-	// Mark the socket we've bound on to listen for incoming connections
-	// The 'backlog' value here should be configurable, but I'll leave this functionality
-	// until 'epoll' is implemented (as it might change some things up).
+	// Mark the socket we've bound on to listen for incoming connections (should probably be configurable)
 	if (listen(bind_socket, 50) == -1) {
 		fprintf(stderr, "Failed to listen on host\n");
 		exit(1);
 	}
 
+	// Prepare for threading
+	pthread_attr_t thread_attributes;
+	{
+		int error_code;
+		if ((error_code = pthread_attr_init(&thread_attributes))) {
+			fprintf(stderr, "Call to 'pthread_attr_init' failed with error code: %d\n", error_code);
+			exit(1);
+		}
+	}
+	{
+		int error_code;
+		if ((error_code = pthread_attr_setstacksize(&thread_attributes, MAX(PTHREAD_STACK_MIN, 32768)))) {
+			fprintf(stderr, "Call to 'pthread_attr_setstacksize' failed with error code: %d\n", error_code);
+			exit(1);
+		}
+	}
+
 	// Accept and deal with clients
-	// TODO: Use 'epoll' event notification for more efficient (less blocking) single-thread usage
-	// TODO: Along with regular optimisation work, look carefully at the syscalls. I haven't done any
-	// benchmarking yet, but I suspect the context switches here aren't going to be helpful for performance.
-	// TODO: Consider multi-threading options
+	// NOTE: The plan was originally to use 'epoll' for more efficient (less blocking) I/O usage, but
+	// it doesn't exist on OS X which is inconvenient for development. I could use 'kqueue', but that
+	// doesn't exist on Linux. As a result, we're sticking with threaded blocking I/O for now (no c10k for us).
+	// TODO: Max thread count.
 	printf("Listening on port %s...\n", bind_port);
 	while (1) {
-		int client_socket = accept(bind_socket, NULL, NULL); // We may want to take this 'sockaddr' info in future
-		if (client_socket == -1) {
+		struct thread_info *tinfo = (struct thread_info *)malloc(sizeof(struct thread_info)); // TODO: Switch from malloc to better pooled alloc, also error check malloc.
+		tinfo->client_socket = accept(bind_socket, NULL, NULL); // We may want to take this 'sockaddr' info in future
+		if (tinfo->client_socket == -1) {
 			fprintf(stderr, "Failed to accept connection from client\n");
 			continue; // We could probably deal with more specifics errors better here
 		}
 
-		// It would be nice if we could reuse this across multiple clients, but when I try
-		// that things break. So we just recreate the socket for every client for now.
-		int backend_socket = create_backend_socket(backend_addr, backend_port);
-
-		process_request(client_socket, backend_socket);
-
-		close(backend_socket);
-		close(client_socket);
+		int error_code;
+		if ((error_code = pthread_create(&tinfo->tid, &thread_attributes, start_client_thread, tinfo))) {
+			fprintf(stderr, "Failed to create new client thread with error code: %d\n", error_code);
+			continue;
+		}
 	}
 
+	pthread_attr_destroy(&thread_attributes);
 	close(bind_socket);
 	return 0;
 }
