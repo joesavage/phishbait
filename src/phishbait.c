@@ -229,30 +229,35 @@ void read_from_client_handler(struct ev_loop *loop, struct ev_io *w, int revents
 	if (watcher->is_first_time) {
 		watcher->is_first_time = 0;
 
-
-		// TODO:
-		// Form an alternate request string for a 'GET' to a resource of a different name (if phishing), and then
-		// close off the connection with the client (i.e. free this pair). If we use the same extension, the
-		// administrator can just add files with whatever he thinks will be hotlinked and everything will work great.
-		// That way, phishing requests also go through whatever other pipeline might be behind this reverse proxy
-		// which is very good (i.e. if we're in front of Varnish, then it can cache phishing requests too.).
-
 		// Parse request HTTP headers for a 'referer' and the request URI.
-		// Given the tool's purpose, we just pass any malformed / odd HTTP requests (plus, this is good for performance).
-		
-		const char *request_uri = NULL, *referer = NULL, *host = NULL;
-		size_t request_uri_length = 0, referer_length = 0, host_length = 0;
+		// Given the tool's purpose, we just pass any malformed / odd HTTP requests (plus, this is good for performance).		
+		const char *request_uri = NULL, *referer = NULL, *host = NULL, *request_ext = NULL;
+		size_t request_uri_length = 0, referer_length = 0, host_length = 0, request_ext_length = 0;
 		if (parse_http_request_header(watcher->data_buffer, &request_uri, &request_uri_length, &referer, &referer_length, &host, &host_length)) {
 			if (referer && referer_length > 0 && request_uri && request_uri_length > 0 && host && host_length > 0) {
+
+				char *new_request = memory_alloc(READ_BUFFER_SIZE + 1); // NOTE: Unsure whether a heap alloc & ptr switch is faster than a stack alloc & memcpy.
+				if (file_extension(request_uri, request_uri_length, &request_ext, &request_ext_length) == -1) {
+					request_ext = "html";
+					request_ext_length = 4;
+				}
+
+				// If this referer is blacklisted, send a different request through the pipeline than the client wrote.
+				// This allows for serving alterate resource to blacklisted referers through a normal client->server
+				// pipline (the request can still run through varnish, nginx, etc.).
 				if (is_referer_blacklisted(referer, referer_length)) {
 					// Form an alternate GET request for a resource of a different name if the request we just read is from a blacklisted source.
 					// This strategy means that these requests go through the existing pipeline (e.g. other reverse proxies, such as Varnish) which is good.
-					// TODO: Use the request_uri to guide the URI change choice.
-					if (snprintf(watcher->data_buffer, READ_BUFFER_SIZE + 1, "GET /phishing.jpg HTTP/1.1\r\nHost: %.*s\r\n\r\n", (int)host_length, host) < 0) {
+					if (snprintf(new_request, READ_BUFFER_SIZE + 1, "GET /phishing.%.*s HTTP/1.1\r\nHost: %.*s\r\n\r\n", (int)request_ext_length, request_ext, (int)host_length, host) < 0) {
+						memory_free(new_request);
 						ev_io_proxy_watcher_free_set(loop, watcher);
 						return;
 					}
+					memory_free(watcher->data_buffer);
+					watcher->data_buffer = new_request;
 					watcher->custom_pair_data[0] = 1; // We're using this as a flag for 'is_blacklisted_referer'
+				} else {
+					memory_free(new_request);
 				}
 			}
 		}

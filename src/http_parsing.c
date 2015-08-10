@@ -152,3 +152,20 @@ int parse_http_request_header(const char *cursor, const char **request_uri_out, 
 
 	return 1;
 }
+
+int file_extension(const char *string, size_t length, const char **string_out, size_t *length_out) {
+	if (length == 0) { return -1; }
+	const char *result = string + length - 1;
+	while (result > string) {
+		if (!is_alpha(*result)) {
+			if (*result == '.') { break; }
+			else { return -1; }
+		}
+		--result;
+	}
+	size_t result_length = length - (result - string) - 1;
+	if (result == string || result_length <= 0 || *(result + 1) == '\0') { return -1; }
+	*string_out = result + 1;
+	*length_out = result_length;
+	return 0;
+}
