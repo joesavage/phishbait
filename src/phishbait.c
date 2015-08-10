@@ -15,7 +15,7 @@
 #include "http_parsing.h"
 #include "socket.h"
 #include "ev_io_proxy_watcher.h"
-#include "ev_io_connection_watcher.h"
+#include "ev_io_client_connect_watcher.h"
 #include "ev_io_backend_connect_watcher.h"
 
 const char *bind_port;
@@ -23,7 +23,7 @@ const char *backend_addr;
 const char *backend_port;
 
 static int create_bind_socket(void);
-static void accept_client_handler(struct ev_loop *loop, struct ev_io *w, int revents);
+static void client_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents);
 static void backend_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents);
 static void register_client_watchers(struct ev_loop *loop, int client_socket, int backend_socket);
 static void read_from_client_handler(struct ev_loop *loop, struct ev_io *w, int revents);
@@ -49,14 +49,14 @@ int main(int argc, char *argv[]) {
 	// TODO: In future, it'd be good if this was multi-threaded.
 	signal(SIGPIPE, SIG_IGN); // Ignore the SIGPIPE signal
 	struct ev_loop *loop = EV_DEFAULT;
-	struct ev_io_connection_watcher client_connection_watcher;	
-	client_connection_watcher.backend_addrinfo = get_host_addrinfos(backend_addr, backend_port, 0); // NOTE: I'm assuming that these won't change throughout the life of our program.
-	ev_io_init(&client_connection_watcher.io, accept_client_handler, bind_socket, EV_READ);
-	ev_io_start(loop, &client_connection_watcher.io);
+	struct ev_io_client_connect_watcher client_connect_watcher;	
+	client_connect_watcher.backend_addrinfo = get_host_addrinfos(backend_addr, backend_port, 0); // NOTE: I'm assuming that these won't change throughout the life of our program.
+	ev_io_init(&client_connect_watcher.io, client_connect_handler, bind_socket, EV_READ);
+	ev_io_start(loop, &client_connect_watcher.io);
 	printf("Listening on port %s...\n", bind_port);
 	ev_run(loop, 0); // Run the libev event loop
 
-	freeaddrinfo(client_connection_watcher.backend_addrinfo);
+	freeaddrinfo(client_connect_watcher.backend_addrinfo);
 	return 0;
 }
 
@@ -107,8 +107,8 @@ int create_bind_socket(void) {
 	return bind_socket;
 }
 
-void accept_client_handler(struct ev_loop *loop, struct ev_io *w, int revents) {
-	struct ev_io_connection_watcher *watcher = (struct ev_io_connection_watcher *)w;
+void client_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents) {
+	struct ev_io_client_connect_watcher *watcher = (struct ev_io_client_connect_watcher *)w;
 
 	int client_socket = accept(watcher->io.fd, NULL, NULL);
 	if (client_socket == -1) {
