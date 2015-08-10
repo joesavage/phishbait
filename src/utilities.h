@@ -10,7 +10,7 @@
 #define ASSERT(cond)
 #endif
 
-#define READ_BUFFER_SIZE 4090
+#define READ_BUFFER_SIZE 4095
 
 void *memory_alloc(size_t size);
 void memory_free(void *memory);

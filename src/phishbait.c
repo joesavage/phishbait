@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <string.h>
 #include <ev.h>
 
 #include "utilities.h"
@@ -144,6 +145,12 @@ void client_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents) 
 	ev_io_start(loop, &backend_connect_watcher->io);
 }
 
+static int is_referer_blacklisted(const char *referer, size_t referer_length) {
+	// NOTE: This code can get hit once per client request (that's pretty frequently).
+	// If you're modifying this routine, try to make sure the code is fast.
+	return referer_length % 2;
+}
+
 void backend_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents) {
 	struct ev_io_backend_connect_watcher *watcher = (struct ev_io_backend_connect_watcher *)w;
 	int backend_socket = watcher->io.fd;
@@ -192,12 +199,14 @@ void register_client_watchers(struct ev_loop *loop, int client_socket, int backe
 
 	char *client_data_buffer = (char *)memory_alloc(READ_BUFFER_SIZE + 1);
 	char *backend_data_buffer = (char *)memory_alloc(READ_BUFFER_SIZE + 1);
-	char *shared_buffer = (char *)memory_alloc(1);
+	char *pairs_finished = (char *)memory_alloc(1);
+	char *client_custom_pair_data = (char *)memory_alloc(1);
 
-	struct ev_io *read_from_client_watcher = init_ev_io_proxy_watcher(read_from_client_proxy_watcher, write_to_backend_proxy_watcher, read_from_backend_proxy_watcher, client_data_buffer, shared_buffer);
-	struct ev_io *write_to_backend_watcher = init_ev_io_proxy_watcher(write_to_backend_proxy_watcher, read_from_client_proxy_watcher, write_to_client_proxy_watcher, client_data_buffer, shared_buffer);
-	struct ev_io *read_from_backend_watcher = init_ev_io_proxy_watcher(read_from_backend_proxy_watcher, write_to_client_proxy_watcher, read_from_client_proxy_watcher, backend_data_buffer, shared_buffer);
-	struct ev_io *write_to_client_watcher = init_ev_io_proxy_watcher(write_to_client_proxy_watcher, read_from_backend_proxy_watcher, write_to_backend_proxy_watcher, backend_data_buffer, shared_buffer);
+
+	struct ev_io *read_from_client_watcher = init_ev_io_proxy_watcher(read_from_client_proxy_watcher, write_to_backend_proxy_watcher, read_from_backend_proxy_watcher, client_data_buffer, pairs_finished, client_custom_pair_data);
+	struct ev_io *write_to_backend_watcher = init_ev_io_proxy_watcher(write_to_backend_proxy_watcher, read_from_client_proxy_watcher, write_to_client_proxy_watcher, client_data_buffer, pairs_finished, client_custom_pair_data);
+	struct ev_io *read_from_backend_watcher = init_ev_io_proxy_watcher(read_from_backend_proxy_watcher, write_to_client_proxy_watcher, read_from_client_proxy_watcher, backend_data_buffer, pairs_finished, NULL);
+	struct ev_io *write_to_client_watcher = init_ev_io_proxy_watcher(write_to_client_proxy_watcher, read_from_backend_proxy_watcher, write_to_backend_proxy_watcher, backend_data_buffer, pairs_finished, NULL);
 
 	// TODO: In future, it might be a good idea to have some kind of timeout destruction of these.
 	ev_io_init(read_from_client_watcher, read_from_client_handler, client_socket, EV_READ);
@@ -220,66 +229,41 @@ void read_from_client_handler(struct ev_loop *loop, struct ev_io *w, int revents
 	if (watcher->is_first_time) {
 		watcher->is_first_time = 0;
 
-		// TODO: Parse HTTP headers (if any)
 
+		// TODO:
 		// Form an alternate request string for a 'GET' to a resource of a different name (if phishing), and then
 		// close off the connection with the client (i.e. free this pair). If we use the same extension, the
 		// administrator can just add files with whatever he thinks will be hotlinked and everything will work great.
 		// That way, phishing requests also go through whatever other pipeline might be behind this reverse proxy
 		// which is very good (i.e. if we're in front of Varnish, then it can cache phishing requests too.).
+
+		// Parse request HTTP headers for a 'referer' and the request URI.
+		// Given the tool's purpose, we just pass any malformed / odd HTTP requests (plus, this is good for performance).
+		
+		const char *request_uri = NULL, *referer = NULL, *host = NULL;
+		size_t request_uri_length = 0, referer_length = 0, host_length = 0;
+		if (parse_http_request_header(watcher->data_buffer, &request_uri, &request_uri_length, &referer, &referer_length, &host, &host_length)) {
+			if (referer && referer_length > 0 && request_uri && request_uri_length > 0 && host && host_length > 0) {
+				if (is_referer_blacklisted(referer, referer_length)) {
+					// Form an alternate GET request for a resource of a different name if the request we just read is from a blacklisted source.
+					// This strategy means that these requests go through the existing pipeline (e.g. other reverse proxies, such as Varnish) which is good.
+					// TODO: Use the request_uri to guide the URI change choice.
+					if (snprintf(watcher->data_buffer, READ_BUFFER_SIZE + 1, "GET /phishing.jpg HTTP/1.1\r\nHost: %.*s\r\n\r\n", (int)host_length, host) < 0) {
+						ev_io_proxy_watcher_free_set(loop, watcher);
+						return;
+					}
+					watcher->custom_pair_data[0] = 1; // We're using this as a flag for 'is_blacklisted_referer'
+				}
+			}
+		}
 	}
 
 	// Forward the client's request to the back-end
 	if (ev_io_proxy_watcher_perform_immediate_write_after_read(loop, watcher, bytes_read, 1) == -1) { return; }
 	if (watcher->paired_watcher->is_first_time) {
+			if (watcher->custom_pair_data[0]) { ev_io_proxy_watcher_free_pair(loop, watcher); }
 			watcher->paired_watcher->is_first_time = 0;
 	}
-
-#if 0
-	// Parse the client's request and forward it to the back-end
-	int parsed_header_successfully = 0, is_phishing_refferal = 0;
-	const char *request_uri = NULL, *referer = NULL;
-	size_t request_uri_length = 0, referer_length = 0;
-	{
-		// Null-terminated HTTP request string (with null buffer, just in case)
-		// TODO: How large do we want MAXIMUM_REQUEST_HEADER_SIZE to be?
-		char request_buffer_head[MAXIMUM_REQUEST_HEADER_SIZE + REQUEST_HEADER_NULL_BUFFER_SIZE];
-		memset(request_buffer_head + MAXIMUM_REQUEST_HEADER_SIZE, 0, REQUEST_HEADER_NULL_BUFFER_SIZE);
-
-		// TODO: It might be desirable in future to have an explicit 'read' timeout here.
-		ssize_t bytes_read = read(watcher.io.fd, request_buffer_head, sizeof(request_buffer_head) - REQUEST_HEADER_NULL_BUFFER_SIZE);
-
-		if (bytes_read == -1) {
-			fprintf(stderr, "Failed to read client header data.\n");
-			ASSERT(0);
-			return;
-		} else if (bytes_read != 0) {
-			// Parse request HTTP 'Referer' header.
-			// Given the tool's purpose, we just pass on any malformed / odd HTTP requests (plus, this is good for performance)
-			if (parse_http_request_header(request_buffer_head, &request_uri, &request_uri_length, &referer, &referer_length)) {
-				if (referer && referer_length > 0) {
-					// printf("REFERER URI: %.*s\n", (int)referer_length, referer);
-
-					is_phishing_refferal = is_referer_blacklisted(referer, referer_length);
-				}
-
-				if (request_uri) {
-					// printf("REQ URI: %.*s\n\n", (int)request_uri_length, request_uri);
-				}
-			}
-
-			// Forward the client's request to the back-end
-			ssize_t bytes_written = write(backend_socket, request_buffer_head, bytes_read);
-			ASSERT(bytes_written == bytes_read);
-			// TODO: Send the rest of the request to the backend! (Currently we only send the first 'read')
-			// char request_buffer_tail[READ_BUFER_SIZE];
-		}
-	}
-
-	// TODO: We need to store this data (request_uri/ext, is_phishing, etc.) with the request through the watcher so we can respond appropriately
-
-	// TODO: Set up the backend response watcher?
-	#endif
 }
 
 void write_to_backend_handler(struct ev_loop *loop, struct ev_io *w, int revents) {
@@ -292,6 +276,7 @@ void write_to_backend_handler(struct ev_loop *loop, struct ev_io *w, int revents
 	}
 
 	if (watcher->is_first_time) {
+		if (watcher->custom_pair_data[0]) { ev_io_proxy_watcher_free_pair(loop, watcher); }
 		watcher->is_first_time = 0;
 	}
 

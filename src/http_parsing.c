@@ -110,7 +110,7 @@ static inline int skip_past_next_http_newline(const char **cursor) {
 }
 
 // RFC7230
-int parse_http_request_header(const char *cursor, const char **request_uri_out, size_t *request_uri_length_out, const char **referer_out, size_t *referer_length_out) {
+int parse_http_request_header(const char *cursor, const char **request_uri_out, size_t *request_uri_length_out, const char **referer_out, size_t *referer_length_out, const char **host_out, size_t *host_length_out) {
 	// Parse HTTP 'Request-Line' [RFC7230 3.1.1]: 'method SP request-target SP HTTP-Version CRLF'
 	if (!match_string(&cursor, "GET ")) { return 0; } // 'method SP'
 
@@ -122,6 +122,8 @@ int parse_http_request_header(const char *cursor, const char **request_uri_out, 
 	if (!skip_number(&cursor)) { return 0; } // '1*DIGIT'
 	if (!match_string(&cursor, ".")) { return 0; } // '.'
 	if (!skip_number(&cursor)) { return 0; } // '1*DIGIT'
+
+	int fields_matched = 0;
 
 	// RFC7230 3.2
 	//     "field-name ":" OWS field-value OWS"
@@ -138,7 +140,13 @@ int parse_http_request_header(const char *cursor, const char **request_uri_out, 
 			// I don't believe the referer field value can be a 'quoted-string'
 			*referer_out = cursor;
 			*referer_length_out = parse_http_uri_rougly(&cursor); // 'field-value'
-			break;
+			if (++fields_matched == 2) { break; }
+		} else if (match_string(&cursor, "Host:")) {
+			skip_http_ows(&cursor); // 'OWS'
+
+			*host_out = cursor;
+			*host_length_out = parse_http_uri_rougly(&cursor); // 'field-value'
+			if (++fields_matched == 2) { break; }
 		}
 	}
 

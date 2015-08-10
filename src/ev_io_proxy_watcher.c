@@ -4,14 +4,15 @@
 #include "ev_io_proxy_watcher.h"
 #include "utilities.h"
 
-struct ev_io *init_ev_io_proxy_watcher(struct ev_io_proxy_watcher *watcher, struct ev_io_proxy_watcher *paired_watcher, struct ev_io_proxy_watcher *alternate_watcher, char *data_chunk, char *shared_buffer) {
-	watcher->pairs_finished = shared_buffer;
-	*watcher->pairs_finished = 0;
-	watcher->data_buffer = data_chunk;
-	watcher->data_buffer[READ_BUFFER_SIZE] = '\0';
-	watcher->is_first_time = 1;
+struct ev_io *init_ev_io_proxy_watcher(struct ev_io_proxy_watcher *watcher, struct ev_io_proxy_watcher *paired_watcher, struct ev_io_proxy_watcher *alternate_watcher, char *data_chunk, char *pairs_finished, char *custom_pair_data) {
 	watcher->paired_watcher = paired_watcher;
 	watcher->alternate_watcher = alternate_watcher;
+	watcher->data_buffer = data_chunk;
+	watcher->data_buffer[READ_BUFFER_SIZE] = '\0';
+	watcher->pairs_finished = pairs_finished;
+	*watcher->pairs_finished = 0;
+	watcher->custom_pair_data = custom_pair_data;
+	watcher->is_first_time = 1;
 	watcher->request_uri = watcher->referer = NULL;
 	watcher->request_uri_length = watcher->referer_length = 0;
 
@@ -26,6 +27,7 @@ void ev_io_proxy_watcher_free_pair(struct ev_loop *loop, struct ev_io_proxy_watc
 		memory_free(watcher->pairs_finished);
 	}
 	memory_free(watcher->data_buffer);
+	if (watcher->custom_pair_data != NULL) { memory_free(watcher->custom_pair_data); }
 	memory_free(watcher->paired_watcher);
 	memory_free(watcher);
 }

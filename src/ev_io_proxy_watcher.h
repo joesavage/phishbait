@@ -10,12 +10,13 @@ struct ev_io_proxy_watcher {
 	char is_first_time;
 	char *data_buffer;
 	char *pairs_finished;
+	char *custom_pair_data; // Use this additional pair-shared data for whatever you wish!
 
 	const char *request_uri, *referer;
 	size_t request_uri_length, referer_length;
 };
 
-struct ev_io *init_ev_io_proxy_watcher(struct ev_io_proxy_watcher *watcher, struct ev_io_proxy_watcher *paired_watcher, struct ev_io_proxy_watcher *alternate_watcher, char *data_chunk, char *shared_buffer);
+struct ev_io *init_ev_io_proxy_watcher(struct ev_io_proxy_watcher *watcher, struct ev_io_proxy_watcher *paired_watcher, struct ev_io_proxy_watcher *alternate_watcher, char *data_chunk, char *pairs_finished, char *custom_pair_data);
 void ev_io_proxy_watcher_free_pair(struct ev_loop *loop, struct ev_io_proxy_watcher *watcher);
 void ev_io_proxy_watcher_free_set(struct ev_loop *loop, struct ev_io_proxy_watcher *watcher);
 
