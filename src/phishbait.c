@@ -34,8 +34,8 @@ static void write_to_client_handler(struct ev_loop *loop, struct ev_io *w, int r
 
 // TODO: In my testing we can't quite make it to c10k quite yet, but I'm not entirely sure
 // why this is. Might be to do with environment, rather than software, configuration.
-// TODO: Occasionally clients seem to disconnect with "connection reset by peer" under
-// high load, but I'm unsure why this happens (could be an environment configuration issue?)
+// TODO: Under medium load, clients may get "connection reset by peer" from the server.
+// This seems to be because of the 'backlog' value, which can be adjusted appropriately.
 // TODO: Now we've split things into multiple files, the compiler probably isn't giving us some inlining
 // performance benefits which is a shame. Maybe switch to a single-file unity compilation build?
 int main(int argc, char *argv[]) {
@@ -99,7 +99,7 @@ int create_bind_socket(void) {
 	bind_addr = NULL;
 
 	// Mark the socket we've bound on to listen for incoming connections ('backlog' should probably be configurable)
-	if (listen(bind_socket, 10) == -1) {
+	if (listen(bind_socket, 50) == -1) {
 		fprintf(stderr, "Failed to listen on host\n");
 		return -1;
 	}
@@ -255,6 +255,7 @@ void read_from_client_handler(struct ev_loop *loop, struct ev_io *w, int revents
 					}
 					memory_free(watcher->data_buffer);
 					watcher->data_buffer = new_request;
+					bytes_read = strlen(new_request);
 					watcher->custom_pair_data[0] = 1; // We're using this as a flag for 'is_blacklisted_referer'
 				} else {
 					memory_free(new_request);
