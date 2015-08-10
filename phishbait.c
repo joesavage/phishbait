@@ -245,7 +245,7 @@ static inline void set_socket_nonblock(int socket) {
 
 struct ev_io_proxy_watcher {
 	ev_io io;
-	ev_io *paired_watcher, *alternate_watcher;
+	struct ev_io_proxy_watcher *paired_watcher, *alternate_watcher;
 	char is_first_time;
 	char *data_buffer;
 	char *pairs_finished;
@@ -260,8 +260,8 @@ static struct ev_io *init_ev_io_proxy_watcher(struct ev_io_proxy_watcher *watche
 	watcher->data_buffer = data_chunk;
 	watcher->data_buffer[READ_BUFFER_SIZE] = '\0';
 	watcher->is_first_time = 1;
-	watcher->paired_watcher = (struct ev_io *)paired_watcher;
-	watcher->alternate_watcher = (struct ev_io *)alternate_watcher;
+	watcher->paired_watcher = paired_watcher;
+	watcher->alternate_watcher = alternate_watcher;
 	watcher->request_uri = watcher->referer = NULL;
 	watcher->request_uri_length = watcher->referer_length = 0;
 
@@ -272,7 +272,7 @@ static void ev_io_proxy_watcher_free_pair(struct ev_loop *loop, struct ev_io_pro
 	ev_io_stop(loop, (struct ev_io *)watcher);
 	if (++(*watcher->pairs_finished) == 2) {
 		close(watcher->io.fd);
-		close(watcher->paired_watcher->fd);
+		close(watcher->paired_watcher->io.fd);
 		memory_free(watcher->pairs_finished);
 	}
 	memory_free(watcher->data_buffer);
@@ -281,10 +281,115 @@ static void ev_io_proxy_watcher_free_pair(struct ev_loop *loop, struct ev_io_pro
 }
 
 static void ev_io_proxy_watcher_free_set(struct ev_loop *loop, struct ev_io_proxy_watcher *watcher) {
-	struct ev_io_proxy_watcher *alternate_watcher = (struct ev_io_proxy_watcher *)watcher->alternate_watcher;
-	ev_io_stop(loop, alternate_watcher->paired_watcher);
+	struct ev_io_proxy_watcher *alternate_watcher = watcher->alternate_watcher;
+	ev_io_stop(loop, &alternate_watcher->paired_watcher->io);
 	ev_io_proxy_watcher_free_pair(loop, alternate_watcher);
 	ev_io_proxy_watcher_free_pair(loop, watcher);
+}
+
+static int ev_io_proxy_watcher_perform_write(struct ev_loop *loop, struct ev_io_proxy_watcher *watcher, int is_write_to_backend) {
+	// Write from this watcher's data buffer into its socket
+	ssize_t bytes_written = write(watcher->io.fd, (void *)watcher->data_buffer, READ_BUFFER_SIZE);
+	if (bytes_written != READ_BUFFER_SIZE) {
+		ASSERT(errno != EAGAIN && errno != EWOULDBLOCK);
+
+		const char *name = is_write_to_backend ? "backend" : "client";
+		if (errno == EPIPE || errno == ECONNRESET) {
+			// TODO: In future, if we're trying to write to the backend, it might be nice to serve a proper 503 error to the user.
+			fprintf(stderr, "Failed to write data to %s due to EPIPE or ECONNRESET (broken connection).\n", name);
+		} else {
+			fprintf(stderr, "Failed to write data to %s with error code: %d.\n", name, errno);
+		}
+
+		if (is_write_to_backend && watcher->is_first_time) {
+			ev_io_proxy_watcher_free_set(loop, watcher);
+		} else {
+			ev_io_proxy_watcher_free_pair(loop, watcher);
+		}
+		watcher = NULL;
+		return -1;
+	}
+
+	return 0;
+}
+
+static int ev_io_proxy_watcher_perform_immediate_read_after_write(struct ev_loop *loop, struct ev_io_proxy_watcher *watcher, int is_read_from_backend) {
+	// Read from the paired watcher's socket into this client's data chunk
+	ssize_t bytes_read = read(watcher->paired_watcher->io.fd, watcher->data_buffer, READ_BUFFER_SIZE);
+	if (bytes_read == -1) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			// Stop the EV_WRITE watcher, and start the paired EV_READ watcher
+			ev_io_stop(loop, (struct ev_io *)watcher);
+			ev_io_start(loop, &watcher->paired_watcher->io);
+		} else {
+			fprintf(stderr, "Failed to read data from client with error code: %d.\n", errno);
+			ev_io_proxy_watcher_free_pair(loop, watcher);
+			watcher = NULL;
+			return -1;
+		}
+	} else if (bytes_read == 0) {
+		ev_io_proxy_watcher_free_pair(loop, watcher);
+		watcher = NULL;
+		return -1;
+	}
+
+	return 0;
+}
+
+static int ev_io_proxy_watcher_perform_immediate_write_after_read(struct ev_loop *loop, struct ev_io_proxy_watcher *watcher, size_t bytes_read, int is_write_to_backend) {
+	// Forward the watcher data chunk to the paired watcher's socket
+	ssize_t bytes_written = write(watcher->paired_watcher->io.fd, watcher->data_buffer, bytes_read);
+	if (bytes_read != bytes_written) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			// Stop the EV_READ from client watcher, and start the EV_WRITE to backend watcher.
+			ev_io_stop(loop, (struct ev_io *)watcher);
+			ev_io_start(loop, &watcher->paired_watcher->io);
+		} else {
+			if (errno != ECONNRESET && errno != EPIPE) {
+				fprintf(stderr, "Failed to write data to backend with error code: %d.\n", errno);
+			} else if (is_write_to_backend) {
+				// TODO: In future, if we're trying to write to the backend, it might be nice to serve a proper 503 error to the user.
+				fprintf(stderr, "Failed to write data to backend due to EPIPE or ECONNRESET (broken connection).\n");
+			}
+			ev_io_proxy_watcher_free_pair(loop, watcher);
+			watcher = NULL;
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static int ev_io_proxy_watcher_perform_read(struct ev_loop *loop, struct ev_io_proxy_watcher *watcher, int is_read_from_backend) {
+	// Read from the watcher's socket into the watcher's data chunk
+	// TODO: It might be desirable in future to have an explicit 'read' timeout here.
+	ssize_t bytes_read = read(watcher->io.fd, (void *)watcher->data_buffer, READ_BUFFER_SIZE);
+	if (bytes_read == -1) {
+		ASSERT(errno != EAGAIN && errno != EWOULDBLOCK);
+
+		const char *name = is_read_from_backend ? "backend" : "client";
+		if (is_read_from_backend || (!is_read_from_backend && (errno != ECONNRESET && errno != EPIPE))) {
+			fprintf(stderr, "Failed to read data from %s with error code: %d.\n", name, errno);
+		}
+
+		if (!is_read_from_backend && watcher->is_first_time) {
+			ev_io_proxy_watcher_free_set(loop, watcher);
+		} else {
+			ev_io_proxy_watcher_free_pair(loop, watcher);
+		}
+		watcher = NULL;
+		return -1;
+	} else if (bytes_read == 0) { // TODO: Are there other forms of disconnection we want to deal with here? (HUP, etc.)
+		if (!is_read_from_backend && watcher->is_first_time) {
+			ev_io_proxy_watcher_free_set(loop, watcher);
+		} else {
+			ev_io_proxy_watcher_free_pair(loop, watcher);
+		}
+		watcher = NULL;
+		return -1;
+	}
+
+	return bytes_read;
 }
 
 static void read_from_backend_handler(struct ev_loop *loop, struct ev_io *w, int revents) {
@@ -292,40 +397,14 @@ static void read_from_backend_handler(struct ev_loop *loop, struct ev_io *w, int
 	ASSERT(!(revents & EV_ERROR));
 
 	// Read from the backend into this client's backend data chunk
-	ssize_t bytes_read = read(watcher->io.fd, (void *)watcher->data_buffer, READ_BUFFER_SIZE);
-	if (bytes_read == -1) {
-		ASSERT(errno != EAGAIN && errno != EWOULDBLOCK);
-		fprintf(stderr, "Failed to read data from backend with error code: %d.\n", errno);
-		ev_io_proxy_watcher_free_pair(loop, watcher);
-		watcher = NULL;
-		return;
-	} else if (bytes_read == 0) { // TODO: Check if RDHUP and HUP and ERR are cases we can check for to also hit this case.
-		ev_io_proxy_watcher_free_pair(loop, watcher);
-		watcher = NULL;
-		return;
-	}
-
-	if (watcher->is_first_time) {
-		watcher->is_first_time = 0;
-	}
+	ssize_t bytes_read;
+	if ((bytes_read = ev_io_proxy_watcher_perform_read(loop, watcher, 1)) == -1) { return; }
+	if (watcher->is_first_time) { watcher->is_first_time = 0; }
 
 	// Forward the backend's response to the client
-	ssize_t bytes_written = write(watcher->paired_watcher->fd, watcher->data_buffer, bytes_read);
-	if (bytes_read != bytes_written) {
-		if (errno == EAGAIN || errno == EWOULDBLOCK) {
-			// Stop the backend EV_READ watcher, and start the client EV_WRITE watcher
-			ev_io_stop(loop, (struct ev_io *)watcher);
-			ev_io_start(loop, watcher->paired_watcher);
-		} else {
-			if (errno != ECONNRESET && errno != EPIPE) {
-				fprintf(stderr, "Failed to write to client with error code: %d.\n", errno);
-			}
-			ev_io_proxy_watcher_free_pair(loop, watcher);
-			watcher = NULL;
-			return;
-		}
-	} else if (((struct ev_io_proxy_watcher *)watcher->paired_watcher)->is_first_time) {
-			((struct ev_io_proxy_watcher *)watcher->paired_watcher)->is_first_time = 0;
+	if (ev_io_proxy_watcher_perform_immediate_write_after_read(loop, watcher, bytes_read, 0) == -1) { return; }
+	if (watcher->paired_watcher->is_first_time) {
+			watcher->paired_watcher->is_first_time = 0;
 	}
 }
 
@@ -334,39 +413,13 @@ static void write_to_client_handler(struct ev_loop *loop, struct ev_io *w, int r
 	ASSERT(!(revents & EV_ERROR));
 
 	// Write from this client's backend data chunk to the client
-	// TODO: FACTOR: into 'ev_io_proxy_watcher_perform_write' (but we need customisability for different errors each way.. hmm..)
-	ssize_t bytes_written = write(watcher->io.fd, (void *)watcher->data_buffer, READ_BUFFER_SIZE);
-	if (bytes_written != READ_BUFFER_SIZE) {
-		ASSERT(errno != EAGAIN && errno != EWOULDBLOCK);
-		fprintf(stderr, "Failed to write data to backend with error code: %d.\n", errno);
-		ev_io_proxy_watcher_free_pair(loop, watcher);
-		watcher = NULL;
-		return;
-	}
-
-	if (watcher->is_first_time) {
-		watcher->is_first_time = 0;
-	}
+	if (ev_io_proxy_watcher_perform_write(loop, watcher, 0) == -1) { return; }
+	if (watcher->is_first_time) { watcher->is_first_time = 0; }
 
 	// Read from the backend into this client's backend data chunk
-	// TODO: FACTOR: into 'ev_io_proxy_watcher_perform_immediate_read_after_write'
-	ssize_t bytes_read = read(watcher->paired_watcher->fd, watcher->data_buffer, READ_BUFFER_SIZE);
-	if (bytes_read == -1) {
-		if (errno == EAGAIN || errno == EWOULDBLOCK) {
-			ev_io_stop(loop, (struct ev_io *)watcher);
-			ev_io_start(loop, watcher->paired_watcher);
-		} else {
-			fprintf(stderr, "Failed to read data from backend with error code: %d.\n", errno);
-			ev_io_proxy_watcher_free_pair(loop, watcher);
-			watcher = NULL;
-			return;
-		}
-	} else if (bytes_read == 0) {
-		ev_io_proxy_watcher_free_pair(loop, watcher);
-		watcher = NULL;
-		return;
-	} else if (((struct ev_io_proxy_watcher *)watcher->paired_watcher)->is_first_time) {
-			((struct ev_io_proxy_watcher *)watcher->paired_watcher)->is_first_time = 0;
+	if (ev_io_proxy_watcher_perform_immediate_read_after_write(loop, watcher, 1) == -1) { return; }
+	if (watcher->paired_watcher->is_first_time) {
+			watcher->paired_watcher->is_first_time = 0;
 	}
 }
 
@@ -375,60 +428,18 @@ static void read_from_client_handler(struct ev_loop *loop, struct ev_io *w, int 
 	ASSERT(!(revents & EV_ERROR));
 
 	// Read from the client into this client's data chunk
-	// TODO: FACTOR: into 'ev_io_proxy_watcher_perform_read'
-	// TODO: It might be desirable in future to have an explicit 'read' timeout here.
-	ssize_t bytes_read = read(watcher->io.fd, (void *)watcher->data_buffer, READ_BUFFER_SIZE);
-	if (bytes_read == -1) {
-		ASSERT(errno != EAGAIN && errno != EWOULDBLOCK);
-		if (errno != ECONNRESET && errno != EPIPE) {
-			fprintf(stderr, "Failed to read data from client with error code: %d.\n", errno);
-		}
-
-		if (watcher->is_first_time) {
-			ev_io_proxy_watcher_free_set(loop, watcher);
-		} else {
-			ev_io_proxy_watcher_free_pair(loop, watcher);
-		}
-		watcher = NULL;
-		return;
-	} else if (bytes_read == 0) { // TODO: RDHUP and a few other cases might also want to hit this case? CHECK!
-		if (watcher->is_first_time) {
-			ev_io_proxy_watcher_free_set(loop, watcher);
-		} else {
-			ev_io_proxy_watcher_free_pair(loop, watcher);
-		}
-		watcher = NULL;
-		return;
-	}
-
+	ssize_t bytes_read;
+	if ((bytes_read = ev_io_proxy_watcher_perform_read(loop, watcher, 0)) == -1) { return; }
 	if (watcher->is_first_time) {
 		watcher->is_first_time = 0;
 
 		// TODO: Parse HTTP headers (if any)
-
 	}
 
 	// Forward the client's request to the back-end
-	// TODO: FACTOR: into 'ev_io_proxy_watcher_perform_immediate_write_after_read' (but we need customisability for different errors each way.. hmm..)
-	ssize_t bytes_written = write(watcher->paired_watcher->fd, watcher->data_buffer, bytes_read);
-	if (bytes_read != bytes_written) {
-		if (errno == EAGAIN || errno == EWOULDBLOCK) {
-			// Stop the EV_READ from client watcher, and start the EV_WRITE to backend watcher.
-			ev_io_stop(loop, (struct ev_io *)watcher);
-			ev_io_start(loop, watcher->paired_watcher);
-		} else {
-			if (errno == EPIPE || errno == ECONNRESET) {
-				// TODO: In future, if we're trying to write to the server, it might be nice to serve a proper 503 error to the user.
-				fprintf(stderr, "Failed to write data to backend due to EPIPE or ECONNRESET (broken connection).\n");
-			} else {
-				fprintf(stderr, "Failed to write data to backend with error code: %d.\n", errno);
-			}
-			ev_io_proxy_watcher_free_pair(loop, watcher);
-			watcher = NULL;
-			return;
-		}
-	} else if (((struct ev_io_proxy_watcher *)watcher->paired_watcher)->is_first_time) {
-			((struct ev_io_proxy_watcher *)watcher->paired_watcher)->is_first_time = 0;
+	if (ev_io_proxy_watcher_perform_immediate_write_after_read(loop, watcher, bytes_read, 1) == -1) { return; }
+	if (watcher->paired_watcher->is_first_time) {
+			watcher->paired_watcher->is_first_time = 0;
 	}
 
 #if 0
@@ -483,23 +494,7 @@ static void write_to_backend_handler(struct ev_loop *loop, struct ev_io *w, int 
 	ASSERT(!(revents & EV_ERROR));
 
 	// Write from this client's data chunk to the backend
-	// TODO: FACTOR: into 'ev_io_proxy_watcher_perform_write' (but we need customisability for different errors each way.. hmm..)
-	ssize_t bytes_written = write(watcher->io.fd, (void *)watcher->data_buffer, READ_BUFFER_SIZE);
-	if (bytes_written != READ_BUFFER_SIZE) {
-		ASSERT(errno != EAGAIN && errno != EWOULDBLOCK);
-		if (errno == EPIPE || errno == ECONNRESET) {
-			// TODO: In future, if we're trying to write to the server, it might be nice to serve a proper 503 error to the user.
-			fprintf(stderr, "Failed to write data to backend due to EPIPE or ECONNRESET (broken connection).\n");
-		} else {
-			fprintf(stderr, "Failed to write data to backend with error code: %d.\n", errno);
-		}
-
-		if (watcher->is_first_time) {
-			ev_io_proxy_watcher_free_set(loop, watcher);
-		} else {
-			ev_io_proxy_watcher_free_pair(loop, watcher);
-		}
-		watcher = NULL;
+	if (ev_io_proxy_watcher_perform_write(loop, watcher, 1) == -1) {
 		return;
 	}
 
@@ -508,26 +503,9 @@ static void write_to_backend_handler(struct ev_loop *loop, struct ev_io *w, int 
 	}
 
 	// Read from the client into this client's data chunk
-	// TODO: FACTOR: into 'ev_io_proxy_watcher_perform_immediate_read_after_write'
-	ssize_t bytes_read = read(watcher->paired_watcher->fd, watcher->data_buffer, READ_BUFFER_SIZE);
-	if (bytes_read == -1) {
-		int error_code = errno;
-		if (error_code == EAGAIN || error_code == EWOULDBLOCK) {
-			// Stop the EV_WRITE to backend watcher, and start the EV_READ from client watcher
-			ev_io_stop(loop, (struct ev_io *)watcher);
-			ev_io_start(loop, watcher->paired_watcher);
-		} else {
-			fprintf(stderr, "Error %d 'read'ing from client\n", error_code);
-		}
-		ev_io_proxy_watcher_free_pair(loop, watcher);
-		watcher = NULL;
-		return;
-	} else if (bytes_read == 0) {
-		ev_io_proxy_watcher_free_pair(loop, watcher);
-		watcher = NULL;
-		return;
-	} else if (((struct ev_io_proxy_watcher *)watcher->paired_watcher)->is_first_time) {
-			((struct ev_io_proxy_watcher *)watcher->paired_watcher)->is_first_time = 0;
+	if (ev_io_proxy_watcher_perform_immediate_read_after_write(loop, watcher, 0) == -1) { return; }
+	if (watcher->paired_watcher->is_first_time) {
+			watcher->paired_watcher->is_first_time = 0;
 	}
 }
 
@@ -664,7 +642,7 @@ static void accept_client_handler(struct ev_loop *loop, struct ev_io *w, int rev
 // TODO: Occasionally clients seem to disconnect with "connection reset by peer" under
 // high load, but I'm unsure why this happens (could be an environment configuration issue?)
 int main(int argc, char *argv[]) {
-	bind_port = "31500"; // TODO: Accept these params as CLI args
+	bind_port = "31500";
 	backend_addr = "localhost";
 	backend_port = "http";
 

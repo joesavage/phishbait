@@ -1,4 +1,4 @@
 phishbait:
-	clang phishbait.c -o phishbait -lev
+	clang phishbait.c -O2 -o phishbait -lev
 
 .PHONY:: phishbait
