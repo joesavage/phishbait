@@ -1,5 +1,5 @@
 CC=clang
-CFLAGS=-O0 -ggdb
+CFLAGS=-O2
 LDLIBS=-lev
 SRCDIR=src
 DESTDIR=src
