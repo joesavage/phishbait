@@ -1,7 +1,12 @@
 # phishbait
 
-`phishbait` is a reverse proxy for HTTP servers that want to serve alternate content to a subset of websites (e.g. phishing sites) that hotlink resources. The program is designed to work on OS X and Linux, but shouldn't be too difficult to port to Windows.
+`phishbait` is a reverse proxy for HTTP servers that want to serve different content to a subset of websites (e.g. phishing sites) that hotlink resources. The program is designed to work on OS X and Linux, but shouldn't be too difficult to port to Windows.
 
-The project makes use of the [libev](http://software.schmorp.de/pkg/libev.html) library for fast event-driven I/O.
+HTTP GET requests from blacklisted referers are modified to requests with the filename 'phishing' and the file extension of the original request - this means requests via blacklisted referers go through a normal request pipeline (through any other reverse proxies, etc.), and that different types of replacement resources can be served up for different requested file extensions.
+
+This project makes use of the [libev](http://software.schmorp.de/pkg/libev.html) library for fast event-driven I/O.
 
 Usage: `phishbait backend_host backend_port [-p listen_port] [-q queue_backlog]`
+
+Demonstration (both websites link the exact same image resources):
+![](/example.gif?raw=true)
