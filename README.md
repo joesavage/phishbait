@@ -4,3 +4,4 @@
 
 The project makes use of the [libev](http://software.schmorp.de/pkg/libev.html) library for fast event-driven I/O.
 
+Usage: `phishbait backend_host backend_port [-p listen_port] [-q queue_backlog]`

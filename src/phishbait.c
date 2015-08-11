@@ -19,11 +19,8 @@
 #include "ev_io_client_connect_watcher.h"
 #include "ev_io_backend_connect_watcher.h"
 
-const char *bind_port;
-const char *backend_addr;
-const char *backend_port;
-
-static int create_bind_socket(void);
+static void usage(const char *program_name);
+static int create_listen_socket(const char *listen_port, int listen_queue_backlog);
 static void client_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents);
 static void backend_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents);
 static void register_client_watchers(struct ev_loop *loop, int client_socket, int backend_socket);
@@ -39,12 +36,45 @@ static void write_to_client_handler(struct ev_loop *loop, struct ev_io *w, int r
 // TODO: Now we've split things into multiple files, the compiler probably isn't giving us some inlining
 // performance benefits which is a shame. Maybe switch to a single-file unity compilation build?
 int main(int argc, char *argv[]) {
-	bind_port = "31500";
-	backend_addr = "localhost";
-	backend_port = "http";
+	const char *program_name = argv[0];
+	const char *listen_port = "3080", *backend_addr = "localhost", *backend_port = "http";
+	int listen_queue_backlog = 50;
 
-	int bind_socket;
-	if ((bind_socket = create_bind_socket()) == -1) { exit(1); }
+	// Parse CLI args
+	{
+		if (argc < 3) { usage(program_name); }
+		backend_addr = argv[1];
+		backend_port = argv[2];
+		argc -= 2;
+		argv += 2;
+
+		extern char *optarg;
+		extern int optind;
+		int ch;
+		while ((ch = getopt(argc, argv, "h?p:q:")) != EOF) {
+			switch(ch) {
+				case 'p':
+					listen_port = optarg;
+					break;
+				case 'q':
+					listen_queue_backlog = atoi(optarg);
+					if (listen_queue_backlog <= 0) {
+						fprintf(stderr, "phishbait: illegal queue backlog value.\n");
+						exit(2);
+					}
+					break;
+				case '?':
+				case 'h':
+				default:
+					usage(program_name);
+			}
+		}
+		argc -= optind;
+		argv += optind;
+	}
+
+	int listen_socket;
+	if ((listen_socket = create_listen_socket(listen_port, listen_queue_backlog)) == -1) { exit(1); }
 	
 	// Setup a libev watcher for new incoming client connections.
 	// TODO: In future, it'd be good if this was multi-threaded.
@@ -52,39 +82,44 @@ int main(int argc, char *argv[]) {
 	struct ev_loop *loop = EV_DEFAULT;
 	struct ev_io_client_connect_watcher client_connect_watcher;	
 	client_connect_watcher.backend_addrinfo = get_host_addrinfos(backend_addr, backend_port, 0); // NOTE: I'm assuming that these won't change throughout the life of our program.
-	ev_io_init(&client_connect_watcher.io, client_connect_handler, bind_socket, EV_READ);
+	ev_io_init(&client_connect_watcher.io, client_connect_handler, listen_socket, EV_READ);
 	ev_io_start(loop, &client_connect_watcher.io);
-	printf("Listening on port %s...\n", bind_port);
+	printf("Forwarding connections from 0.0.0.0:%s to %s:%s...\n", listen_port, backend_addr, backend_port);
 	ev_run(loop, 0); // Run the libev event loop
 
 	freeaddrinfo(client_connect_watcher.backend_addrinfo);
 	return 0;
 }
 
-int create_bind_socket(void) {
+void usage(const char *program_name) {
+	fprintf(stderr, "usage: %s backend_host backend_port [-p listen_port] [-q queue_backlog]\n", program_name);
+	exit(1);
+}
+
+int create_listen_socket(const char *listen_port, int listen_queue_backlog) {
 	// Get the 'addrinfo' structs we might want to host on
-	struct addrinfo *bind_addrs = get_host_addrinfos(NULL, bind_port, AI_PASSIVE);
+	struct addrinfo *bind_addrs = get_host_addrinfos(NULL, listen_port, AI_PASSIVE);
 
 	// Bind to the address to host on
-	int bind_socket;
+	int listen_socket;
 	struct addrinfo *bind_addr;
 	for (bind_addr = bind_addrs; bind_addr != NULL; bind_addr = bind_addr->ai_next) {
 		// Find an address for the backend that we can create a socket to
-		if ((bind_socket = socket(bind_addr->ai_family, bind_addr->ai_socktype, bind_addr->ai_protocol)) == -1) {
+		if ((listen_socket = socket(bind_addr->ai_family, bind_addr->ai_socktype, bind_addr->ai_protocol)) == -1) {
 			continue;
 		}
 
 		int so_reuseaddr = 1;
-		if (setsockopt(bind_socket, SOL_SOCKET, SO_REUSEADDR, &so_reuseaddr, sizeof(so_reuseaddr)) == -1) {
+		if (setsockopt(listen_socket, SOL_SOCKET, SO_REUSEADDR, &so_reuseaddr, sizeof(so_reuseaddr)) == -1) {
 			fprintf(stderr, "'setsockopt' failed\n");
 			return -1;
 		}
 
 		// Try to bind on the newly constructed socket
-		if (!bind(bind_socket, bind_addr->ai_addr, bind_addr->ai_addrlen)) {
+		if (!bind(listen_socket, bind_addr->ai_addr, bind_addr->ai_addrlen)) {
 			break; // Success!
 		}
-		close(bind_socket);
+		close(listen_socket);
 	}
 
 	// Check if we managed to bind successfully to the host
@@ -99,13 +134,13 @@ int create_bind_socket(void) {
 	bind_addr = NULL;
 
 	// Mark the socket we've bound on to listen for incoming connections ('backlog' should probably be configurable)
-	if (listen(bind_socket, 50) == -1) {
+	if (listen(listen_socket, listen_queue_backlog) == -1) {
 		fprintf(stderr, "Failed to listen on host\n");
 		return -1;
 	}
-	set_socket_nonblock(bind_socket);
+	set_socket_nonblock(listen_socket);
 
-	return bind_socket;
+	return listen_socket;
 }
 
 void client_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents) {
