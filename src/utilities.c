@@ -1,9 +1,15 @@
 #include <stdlib.h>
+#include <stdio.h>
 
-// TODO: Don't use malloc/free directly. Plus, check allocation errors.
+// NOTE: In future, it would be nice to avoid using malloc/free directly.
 
 void *memory_alloc(size_t size) {
-	return malloc(size);
+	void *result = malloc(size);
+	if (!result) {
+		fprintf(stderr, "'malloc' failed - insufficient storage space available.\n");
+		exit(1);
+	}
+	return result;
 }
 
 void memory_free(void *memory) {

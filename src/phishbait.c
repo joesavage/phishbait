@@ -29,12 +29,13 @@ static void write_to_backend_handler(struct ev_loop *loop, struct ev_io *w, int 
 static void read_from_backend_handler(struct ev_loop *loop, struct ev_io *w, int revents);
 static void write_to_client_handler(struct ev_loop *loop, struct ev_io *w, int revents);
 
-// TODO: In my testing we can't quite make it to c10k quite yet, but I'm not entirely sure
+// NOTE: In my testing we can't quite make it to c10k quite yet, but I'm not entirely sure
 // why this is. Might be to do with environment, rather than software, configuration.
-// TODO: Under medium load, clients may get "connection reset by peer" from the server.
+// NOTE: Now we've split things into multiple files, the compiler probably isn't giving us some inlining
+// performance benefits which is a shame. If this becomes a performance issue, switching to a single-file
+// 'unity' compilation model might help.
+// NOTE: Under medium load, clients may get "connection reset by peer" from the server.
 // This seems to be because of the 'backlog' value, which can be adjusted appropriately.
-// TODO: Now we've split things into multiple files, the compiler probably isn't giving us some inlining
-// performance benefits which is a shame. Maybe switch to a single-file unity compilation build?
 int main(int argc, char *argv[]) {
 	const char *program_name = argv[0];
 	const char *listen_port = "3080", *backend_addr = "localhost", *backend_port = "http";
@@ -77,7 +78,7 @@ int main(int argc, char *argv[]) {
 	if ((listen_socket = create_listen_socket(listen_port, listen_queue_backlog)) == -1) { exit(1); }
 	
 	// Setup a libev watcher for new incoming client connections.
-	// TODO: In future, it'd be good if this was multi-threaded.
+	// NOTE: In future, it'd be good if this was multi-threaded.
 	signal(SIGPIPE, SIG_IGN); // Ignore the SIGPIPE signal
 	struct ev_loop *loop = EV_DEFAULT;
 	struct ev_io_client_connect_watcher client_connect_watcher;	
@@ -160,7 +161,7 @@ void client_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents) 
 
 
 	// Create a backend socket, attempt to connect to it, and watch for when it becomes writable.
-	// TODO: In future, it would be good if backend connection errors were handled more gracefully
+	// NOTE: In future, it would be good if backend connection errors were handled more gracefully
 	int backend_socket = obtain_next_valid_socket(&watcher->backend_addrinfo);
 	if (backend_socket == -1) {
 		fprintf(stderr, "Failed to obtain valid backend socket.\n");
@@ -183,6 +184,9 @@ void client_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents) 
 static int is_referer_blacklisted(const char *referer, size_t referer_length) {
 	// NOTE: This code can get hit once per client request (that's pretty frequently).
 	// If you're modifying this routine, try to make sure the code is fast.
+	// NOTE: Depending on the performance characteristics of this code, you may wish to
+	// utilize some form of caching here (using some subset of the 'referer' string as a key).
+	// In such a scenario both blacklist and whitelist caching would likely be beneficial.
 	return referer_length % 2;
 }
 
@@ -202,7 +206,7 @@ void backend_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents)
 	}
 
 	// If we failed to create a connection to the socket we tried last...
-	// TODO: In future, it would be good if backend connection errors were handled more gracefully
+	// NOTE: In future, it would be good if backend connection errors were handled more gracefully
 	backend_socket = obtain_next_valid_socket(&watcher->backend_addrinfo);
 	if (backend_socket == -1) {
 		fprintf(stderr, "Failed to obtain valid backend socket.\n");
@@ -243,7 +247,7 @@ void register_client_watchers(struct ev_loop *loop, int client_socket, int backe
 	struct ev_io *read_from_backend_watcher = init_ev_io_proxy_watcher(read_from_backend_proxy_watcher, write_to_client_proxy_watcher, read_from_client_proxy_watcher, backend_data_buffer, pairs_finished, NULL);
 	struct ev_io *write_to_client_watcher = init_ev_io_proxy_watcher(write_to_client_proxy_watcher, read_from_backend_proxy_watcher, write_to_backend_proxy_watcher, backend_data_buffer, pairs_finished, NULL);
 
-	// TODO: In future, it might be a good idea to have some kind of timeout destruction of these.
+	// NOTE: In future, it might be a good idea to have some kind of timeout destruction of these.
 	ev_io_init(read_from_client_watcher, read_from_client_handler, client_socket, EV_READ);
 	ev_io_init(write_to_backend_watcher, write_to_backend_handler, backend_socket, EV_WRITE);
 	ev_io_init(read_from_backend_watcher, read_from_backend_handler, backend_socket, EV_READ);

@@ -41,7 +41,7 @@ void ev_io_proxy_watcher_free_set(struct ev_loop *loop, struct ev_io_proxy_watch
 
 int ev_io_proxy_watcher_perform_read(struct ev_loop *loop, struct ev_io_proxy_watcher *watcher, int is_read_from_backend) {
 	// Read from the watcher's socket into the watcher's data chunk
-	// TODO: It might be desirable in future to have an explicit 'read' timeout here.
+	// NOTE: It might be desirable in future to have an explicit 'read' timeout here.
 	ssize_t bytes_read = read(watcher->io.fd, (void *)watcher->data_buffer, READ_BUFFER_SIZE);
 	if (bytes_read == -1) {
 		ASSERT(errno != EAGAIN && errno != EWOULDBLOCK);
@@ -58,7 +58,7 @@ int ev_io_proxy_watcher_perform_read(struct ev_loop *loop, struct ev_io_proxy_wa
 		}
 		watcher = NULL;
 		return -1;
-	} else if (bytes_read == 0) { // TODO: Are there other forms of disconnection we want to deal with here? (HUP, etc.)
+	} else if (bytes_read == 0) {
 		if (!is_read_from_backend && watcher->is_first_time) {
 			ev_io_proxy_watcher_free_set(loop, watcher);
 		} else {
@@ -79,7 +79,7 @@ int ev_io_proxy_watcher_perform_write(struct ev_loop *loop, struct ev_io_proxy_w
 
 		const char *name = is_write_to_backend ? "backend" : "client";
 		if (errno == EPIPE || errno == ECONNRESET) {
-			// TODO: In future, if we're trying to write to the backend, it might be nice to serve a proper 503 error to the user.
+			// NOTE: In future, if we're trying to write to the backend, it might be nice to serve a proper 503 error to the user.
 			fprintf(stderr, "Failed to write data to %s due to EPIPE or ECONNRESET (broken connection).\n", name);
 		} else {
 			fprintf(stderr, "Failed to write data to %s with error code: %d.\n", name, errno);
@@ -109,7 +109,7 @@ int ev_io_proxy_watcher_perform_immediate_write_after_read(struct ev_loop *loop,
 			if (errno != ECONNRESET && errno != EPIPE) {
 				fprintf(stderr, "Failed to write data to backend with error code: %d.\n", errno);
 			} else if (is_write_to_backend) {
-				// TODO: In future, if we're trying to write to the backend, it might be nice to serve a proper 503 error to the user.
+				// NOTE: In future, if we're trying to write to the backend, it might be nice to serve a proper 503 error to the user.
 				fprintf(stderr, "Failed to write data to backend due to EPIPE or ECONNRESET (broken connection).\n");
 			}
 			ev_io_proxy_watcher_free_pair(loop, watcher);
