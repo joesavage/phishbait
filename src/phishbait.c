@@ -39,7 +39,7 @@ static void write_to_client_handler(struct ev_loop *loop, struct ev_io *w, int r
 int main(int argc, char *argv[]) {
 	const char *program_name = argv[0];
 	const char *listen_port = "3080", *backend_addr = "localhost", *backend_port = "http";
-	int listen_queue_backlog = 50;
+	int listen_queue_backlog = 128; // NOTE: What this value 'should' be seems to be controversial.
 
 	// Parse CLI args
 	{
@@ -99,44 +99,44 @@ void usage(const char *program_name) {
 
 int create_listen_socket(const char *listen_port, int listen_queue_backlog) {
 	// Get the 'addrinfo' structs we might want to host on
-	struct addrinfo *bind_addrs = get_host_addrinfos(NULL, listen_port, AI_PASSIVE);
+	struct addrinfo *listen_addrs = get_host_addrinfos(NULL, listen_port, AI_PASSIVE);
 
 	// Bind to the address to host on
 	int listen_socket;
-	struct addrinfo *bind_addr;
-	for (bind_addr = bind_addrs; bind_addr != NULL; bind_addr = bind_addr->ai_next) {
-		// Find an address for the backend that we can create a socket to
-		if ((listen_socket = socket(bind_addr->ai_family, bind_addr->ai_socktype, bind_addr->ai_protocol)) == -1) {
+	struct addrinfo *listen_addr;
+	for (listen_addr = listen_addrs; listen_addr != NULL; listen_addr = listen_addr->ai_next) {
+		// Find an addrinfo for the backend that we can create a socket with
+		if ((listen_socket = socket(listen_addr->ai_family, listen_addr->ai_socktype, listen_addr->ai_protocol)) == -1) {
 			continue;
 		}
 
 		int so_reuseaddr = 1;
 		if (setsockopt(listen_socket, SOL_SOCKET, SO_REUSEADDR, &so_reuseaddr, sizeof(so_reuseaddr)) == -1) {
-			fprintf(stderr, "'setsockopt' failed\n");
+			fprintf(stderr, "'setsockopt' failed.\n");
 			return -1;
 		}
 
 		// Try to bind on the newly constructed socket
-		if (!bind(listen_socket, bind_addr->ai_addr, bind_addr->ai_addrlen)) {
+		if (!bind(listen_socket, listen_addr->ai_addr, listen_addr->ai_addrlen)) {
 			break; // Success!
 		}
 		close(listen_socket);
 	}
 
 	// Check if we managed to bind successfully to the host
-	if (bind_addr == NULL) {
-		fprintf(stderr, "Failed to bind to host\n");
+	if (listen_addr == NULL) {
+		fprintf(stderr, "Failed to bind to host.\n");
 		return -1;
 	}
 
-	// We're done with 'addrinfo' structs
-	freeaddrinfo(bind_addrs);
-	bind_addrs = NULL;
-	bind_addr = NULL;
+	// We're done with the 'addrinfo' structs
+	freeaddrinfo(listen_addrs);
+	listen_addrs = NULL;
+	listen_addr = NULL;
 
-	// Mark the socket we've bound on to listen for incoming connections ('backlog' should probably be configurable)
+	// Mark the socket we've bound on to listen for incoming connections
 	if (listen(listen_socket, listen_queue_backlog) == -1) {
-		fprintf(stderr, "Failed to listen on host\n");
+		fprintf(stderr, "Failed to listen on host.\n");
 		return -1;
 	}
 	set_socket_nonblock(listen_socket);
@@ -161,11 +161,12 @@ void client_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents) 
 
 
 	// Create a backend socket, attempt to connect to it, and watch for when it becomes writable.
-	// NOTE: In future, it would be good if backend connection errors were handled more gracefully
+	// NOTE: In future, it would be good if backend connection errors resulted in user notification of these issues
 	int backend_socket = obtain_next_valid_socket(&watcher->backend_addrinfo);
 	if (backend_socket == -1) {
 		fprintf(stderr, "Failed to obtain valid backend socket.\n");
-		exit(1);
+		close(client_socket);
+		return;
 	}
 	set_socket_nonblock(backend_socket);
 	struct ev_io_backend_connect_watcher *backend_connect_watcher = (struct ev_io_backend_connect_watcher *)memory_alloc(sizeof(struct ev_io_backend_connect_watcher));
@@ -177,17 +178,10 @@ void client_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents) 
 		close(backend_socket);
 		return;
 	}
+
+	// Create a libev watcher for the backend socket becoming writable (i.e. 'connect' finished)
 	ev_io_init(&backend_connect_watcher->io, backend_connect_handler, backend_socket, EV_WRITE);
 	ev_io_start(loop, &backend_connect_watcher->io);
-}
-
-static int is_referer_blacklisted(const char *referer, size_t referer_length) {
-	// NOTE: This code can get hit once per client request (that's pretty frequently).
-	// If you're modifying this routine, try to make sure the code is fast.
-	// NOTE: Depending on the performance characteristics of this code, you may wish to
-	// utilize some form of caching here (using some subset of the 'referer' string as a key).
-	// In such a scenario both blacklist and whitelist caching would likely be beneficial.
-	return referer_length % 2;
 }
 
 void backend_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents) {
@@ -206,11 +200,14 @@ void backend_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents)
 	}
 
 	// If we failed to create a connection to the socket we tried last...
-	// NOTE: In future, it would be good if backend connection errors were handled more gracefully
+	// NOTE: In future, it would be good if backend connection errors resulted in user notification of these issues
 	backend_socket = obtain_next_valid_socket(&watcher->backend_addrinfo);
 	if (backend_socket == -1) {
 		fprintf(stderr, "Failed to obtain valid backend socket.\n");
-		exit(1);
+		ev_io_stop(loop, &watcher->io);
+		memory_free(watcher);
+		close(watcher->client_socket);
+		return;
 	}
 
 	if (connect(backend_socket, watcher->backend_addrinfo->ai_addr, watcher->backend_addrinfo->ai_addrlen) == -1 && errno != EINPROGRESS) {
@@ -241,7 +238,6 @@ void register_client_watchers(struct ev_loop *loop, int client_socket, int backe
 	char *pairs_finished = (char *)memory_alloc(1);
 	char *client_custom_pair_data = (char *)memory_alloc(1);
 
-
 	struct ev_io *read_from_client_watcher = init_ev_io_proxy_watcher(read_from_client_proxy_watcher, write_to_backend_proxy_watcher, read_from_backend_proxy_watcher, client_data_buffer, pairs_finished, client_custom_pair_data);
 	struct ev_io *write_to_backend_watcher = init_ev_io_proxy_watcher(write_to_backend_proxy_watcher, read_from_client_proxy_watcher, write_to_client_proxy_watcher, client_data_buffer, pairs_finished, client_custom_pair_data);
 	struct ev_io *read_from_backend_watcher = init_ev_io_proxy_watcher(read_from_backend_proxy_watcher, write_to_client_proxy_watcher, read_from_client_proxy_watcher, backend_data_buffer, pairs_finished, NULL);
@@ -256,6 +252,15 @@ void register_client_watchers(struct ev_loop *loop, int client_socket, int backe
 	// Start the EV_READ watchers for the client and backend
 	ev_io_start(loop, read_from_client_watcher);
 	ev_io_start(loop, read_from_backend_watcher);
+}
+
+static int is_referer_blacklisted(const char *referer, size_t referer_length) {
+	// NOTE: This code can get hit once per client request (that's pretty frequently).
+	// If you're modifying this routine, try to make sure the code is fast.
+	// NOTE: Depending on the performance characteristics of this code, you may wish to
+	// utilize some form of caching here (using some subset of the 'referer' string as a key).
+	// In such a scenario both blacklist and whitelist caching would likely be beneficial.
+	return referer_length % 2;
 }
 
 void read_from_client_handler(struct ev_loop *loop, struct ev_io *w, int revents) {
@@ -275,7 +280,7 @@ void read_from_client_handler(struct ev_loop *loop, struct ev_io *w, int revents
 		if (parse_http_request_header(watcher->data_buffer, &request_uri, &request_uri_length, &referer, &referer_length, &host, &host_length)) {
 			if (referer && referer_length > 0 && request_uri && request_uri_length > 0 && host && host_length > 0) {
 
-				char *new_request = memory_alloc(READ_BUFFER_SIZE + 1); // NOTE: Unsure whether a heap alloc & ptr switch is faster than a stack alloc & memcpy.
+				char *new_request = memory_alloc(READ_BUFFER_SIZE + 1); // NOTE: Unsure whether a heap alloc & ptr switch is faster than a stack alloc & memcpy here.
 				if (file_extension(request_uri, request_uri_length, &request_ext, &request_ext_length) == -1) {
 					request_ext = "html";
 					request_ext_length = 4;
@@ -286,7 +291,6 @@ void read_from_client_handler(struct ev_loop *loop, struct ev_io *w, int revents
 				// pipline (the request can still run through varnish, nginx, etc.).
 				if (is_referer_blacklisted(referer, referer_length)) {
 					// Form an alternate GET request for a resource of a different name if the request we just read is from a blacklisted source.
-					// This strategy means that these requests go through the existing pipeline (e.g. other reverse proxies, such as Varnish) which is good.
 					if (snprintf(new_request, READ_BUFFER_SIZE + 1, "GET /phishing.%.*s HTTP/1.1\r\nHost: %.*s\r\n\r\n", (int)request_ext_length, request_ext, (int)host_length, host) < 0) {
 						memory_free(new_request);
 						ev_io_proxy_watcher_free_set(loop, watcher);

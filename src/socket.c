@@ -17,7 +17,7 @@ struct addrinfo *get_host_addrinfos(const char *host_addr, const char *host_port
 	if ((error_code = getaddrinfo(host_addr, host_port, &hints, &result))) {
 		host_addr = host_addr ? host_addr : "NULL";
 		host_port = host_port ? host_port : "NULL";
-		fprintf(stderr, "'getaddrinfo' failed for host '%s' on port '%s', with error code: %d\n", host_addr, host_port, error_code);
+		fprintf(stderr, "'getaddrinfo' failed for host '%s' on port '%s', with error code: %d.\n", host_addr, host_port, error_code);
 		exit(1);
 	}
 
@@ -26,7 +26,7 @@ struct addrinfo *get_host_addrinfos(const char *host_addr, const char *host_port
 
 void set_socket_nonblock(int socket) {
 	if (fcntl(socket, F_SETFL, O_NONBLOCK)) {
-		fprintf(stderr, "Failed to change socket to non-blocking (O_NONBLOCK)\n");
+		fprintf(stderr, "Failed to change socket to non-blocking (O_NONBLOCK).\n");
 		exit(1);
 	}
 }

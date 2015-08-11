@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-// NOTE: In future, it would be nice to avoid using malloc/free directly.
+// NOTE: In future, it would be nice to avoid using malloc/free directly (custom allocator[s]!)
 
 void *memory_alloc(size_t size) {
 	void *result = malloc(size);
