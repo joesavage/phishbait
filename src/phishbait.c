@@ -153,7 +153,7 @@ void client_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents) 
 		if (errno == ENOBUFS || errno == ENOMEM) {
 			fprintf(stderr, "Failed to accept client connection due to insufficient memory (may be socket buffer limits).\n");
 		} else {
-			fprintf(stderr, "Failed to accept client connection.\n");
+			fprintf(stderr, "Failed to accept client connection with error code: %d.\n", errno);
 		}
 		// NOTE: We don't have any memory to free or sockets to close in this particular case.
 		return;
@@ -162,17 +162,17 @@ void client_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents) 
 
 	// Create a backend socket, attempt to connect to it, and watch for when it becomes writable.
 	// NOTE: In future, it would be good if backend connection errors resulted in user notification of these issues
-	int backend_socket = obtain_next_valid_socket(&watcher->backend_addrinfo);
+	struct addrinfo *backend_addrinfo = watcher->backend_addrinfo;
+	int backend_socket = obtain_next_valid_socket(&backend_addrinfo);
 	if (backend_socket == -1) {
-		fprintf(stderr, "Failed to obtain valid backend socket.\n");
 		close(client_socket);
 		return;
 	}
 	set_socket_nonblock(backend_socket);
 	struct ev_io_backend_connect_watcher *backend_connect_watcher = (struct ev_io_backend_connect_watcher *)memory_alloc(sizeof(struct ev_io_backend_connect_watcher));
 	backend_connect_watcher->client_socket = client_socket;
-	backend_connect_watcher->backend_addrinfo = watcher->backend_addrinfo;
-	if (connect(backend_socket, watcher->backend_addrinfo->ai_addr, watcher->backend_addrinfo->ai_addrlen) == -1 && errno != EINPROGRESS) {
+	backend_connect_watcher->backend_addrinfo = backend_addrinfo;
+	if (connect(backend_socket, backend_addrinfo->ai_addr, backend_addrinfo->ai_addrlen) == -1 && errno != EINPROGRESS) {
 		memory_free(backend_connect_watcher);
 		close(client_socket);
 		close(backend_socket);
@@ -203,7 +203,6 @@ void backend_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents)
 	// NOTE: In future, it would be good if backend connection errors resulted in user notification of these issues
 	backend_socket = obtain_next_valid_socket(&watcher->backend_addrinfo);
 	if (backend_socket == -1) {
-		fprintf(stderr, "Failed to obtain valid backend socket.\n");
 		ev_io_stop(loop, &watcher->io);
 		memory_free(watcher);
 		close(watcher->client_socket);

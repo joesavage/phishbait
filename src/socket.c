@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
 #include <fcntl.h>
 #include "socket.h"
 
@@ -32,15 +33,26 @@ void set_socket_nonblock(int socket) {
 }
 
 int obtain_next_valid_socket(struct addrinfo **addrinfos) {
-	int current_socket = -1;
+	int current_socket = -1, error = 0;
 	struct addrinfo *current_addrinfo;
 	for (current_addrinfo = *addrinfos; current_addrinfo != NULL; current_addrinfo = current_addrinfo->ai_next) {
-		if ((current_socket = socket(current_addrinfo->ai_family, current_addrinfo->ai_socktype, current_addrinfo->ai_protocol))) {
+		if ((current_socket = socket(current_addrinfo->ai_family, current_addrinfo->ai_socktype, current_addrinfo->ai_protocol)) != -1) {
 			break;
+		}
+		if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) {
+			fprintf(stderr, "Failed to create backend socket due to insufficient resources (error code: %d).\n", errno);
+			error = 1;
+		} else if (errno == EINVAL) {
+			fprintf(stderr, "Failed to create backend socket due to invalid 'flags' in type (EINVAL).\n");
+			error = 1;
 		}
 		close(current_socket);
 	}
-
 	*addrinfos = current_addrinfo;
-	return current_addrinfo == NULL ? -1 : current_socket;
+
+	if (current_addrinfo == NULL && !error) {
+		fprintf(stderr, "Failed to create backend socket (iterated over all addrinfos).\n", errno);
+		return -1;
+	}
+	return current_socket;
 }
