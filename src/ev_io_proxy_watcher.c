@@ -82,7 +82,9 @@ int ev_io_proxy_watcher_perform_write(struct ev_loop *loop, struct ev_io_proxy_w
 			// NOTE: In future, if we're trying to write to the backend, it might be nice to serve a proper 503 error to the user.
 			fprintf(stderr, "Failed to write data to %s due to EPIPE or ECONNRESET (broken connection).\n", name);
 		} else {
-			fprintf(stderr, "Failed to write data to %s with error code: %d.\n", name, errno);
+			if (errno != EPROTOTYPE) { // Why EPROTOTYPE? OS X: http://erickt.github.io/blog/2014/11/19/adventures-in-debugging-a-potential-osx-kernel-bug/
+				fprintf(stderr, "Failed to write data to %s with error code: %d.\n", name, errno);
+			}
 		}
 
 		if (is_write_to_backend && watcher->is_first_time) {
@@ -109,8 +111,10 @@ int ev_io_proxy_watcher_perform_immediate_write_after_read(struct ev_loop *loop,
 			if (errno != ECONNRESET && errno != EPIPE) {
 				fprintf(stderr, "Failed to write data to backend with error code: %d.\n", errno);
 			} else if (is_write_to_backend) {
-				// NOTE: In future, if we're trying to write to the backend, it might be nice to serve a proper 503 error to the user.
-				fprintf(stderr, "Failed to write data to backend due to EPIPE or ECONNRESET (broken connection).\n");
+				if (errno != EPROTOTYPE) { // Why EPROTOTYPE? OS X: http://erickt.github.io/blog/2014/11/19/adventures-in-debugging-a-potential-osx-kernel-bug/
+					// NOTE: In future, if we're trying to write to the backend, it might be nice to serve a proper 503 error to the user.
+					fprintf(stderr, "Failed to write data to backend due to EPIPE or ECONNRESET (broken connection).\n");
+				}
 			}
 			ev_io_proxy_watcher_free_pair(loop, watcher);
 			watcher = NULL;
