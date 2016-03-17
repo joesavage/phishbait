@@ -1,7 +1,5 @@
 /*
  * Phishbait - a reverse proxy for dealing with uninvited hotlinking.
- * Copyright 2015, Joe Savage
- * 
  * NOTE: This codebase assumes that we're compiling with an ASCII character set.
 */
 
