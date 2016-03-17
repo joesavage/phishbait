@@ -32,8 +32,7 @@ static void write_to_client_handler(struct ev_loop *loop, struct ev_io *w, int r
 // NOTE: In my testing we can't quite make it to c10k quite yet, but I'm not entirely sure
 // why this is. Might be to do with environment, rather than software, configuration.
 // NOTE: Now we've split things into multiple files, the compiler probably isn't giving us some inlining
-// performance benefits which is a shame. If this becomes a performance issue, switching to a single-file
-// 'unity' compilation model might help.
+// performance benefits which is a shame. Could inline some functions in headers.
 // NOTE: Under medium load, clients may get "connection reset by peer" from the server.
 // This seems to be because of the 'backlog' value, which can be adjusted appropriately.
 int main(int argc, char *argv[]) {
