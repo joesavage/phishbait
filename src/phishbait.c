@@ -184,6 +184,7 @@ void client_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents) 
 void backend_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents) {
 	struct ev_io_backend_connect_watcher *watcher = (struct ev_io_backend_connect_watcher *)w;
 	int backend_socket = watcher->io.fd;
+	int client_socket = watcher->client_socket;
 
 	int backend_connect_error;
 	socklen_t result_length = sizeof(backend_connect_error);
@@ -192,7 +193,7 @@ void backend_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents)
 		ev_io_stop(loop, &watcher->io);
 		memory_free(watcher);
 
-		register_client_watchers(loop, watcher->client_socket, backend_socket);
+		register_client_watchers(loop, client_socket, backend_socket);
 		return;
 	}
 
@@ -202,14 +203,14 @@ void backend_connect_handler(struct ev_loop *loop, struct ev_io *w, int revents)
 	if (backend_socket == -1) {
 		ev_io_stop(loop, &watcher->io);
 		memory_free(watcher);
-		close(watcher->client_socket);
+		close(client_socket);
 		return;
 	}
 
 	if (connect(backend_socket, watcher->backend_addrinfo->ai_addr, watcher->backend_addrinfo->ai_addrlen) == -1 && errno != EINPROGRESS) {
 		ev_io_stop(loop, &watcher->io);
 		memory_free(watcher);
-		close(watcher->client_socket);
+		close(client_socket);
 		close(backend_socket);
 		return;
 	}
@@ -306,8 +307,8 @@ void read_from_client_handler(struct ev_loop *loop, struct ev_io *w, int revents
 	// Forward the client's request to the back-end
 	if (ev_io_proxy_watcher_perform_immediate_write_after_read(loop, watcher, bytes_read, 1) == -1) { return; }
 	if (watcher->paired_watcher->is_first_time) {
-			if (watcher->custom_pair_data[0]) { ev_io_proxy_watcher_free_pair(loop, watcher); }
 			watcher->paired_watcher->is_first_time = 0;
+			if (watcher->custom_pair_data[0]) { ev_io_proxy_watcher_free_pair(loop, watcher); }
 	}
 }
 
